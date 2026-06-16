@@ -4,9 +4,9 @@
 
 enum class Axis : uint8_t {
   X,
+  X1,
+  X2,
   Y,
-  Y1,
-  Y2,
   Z,
   UNKNOWN
 };
@@ -17,6 +17,8 @@ struct MotorNode {
   int8_t direction;
   int64_t rawEncoder = 0;
   int64_t encoder = 0;
+  int64_t previousEncoder = 0;
+  uint32_t lastEncoderUpdateMs = 0;
   int16_t rpm = 0;
   uint8_t lastAcc = 0;
   uint8_t moveStatus = 0;
@@ -54,9 +56,9 @@ bool forEachMotorInAxis(Axis axis, Callback callback) {
   switch (axis) {
     case Axis::X:
       ok &= callback(motors[0]);
+      ok &= callback(motors[1]);
       break;
     case Axis::Y:
-      ok &= callback(motors[1]);
       ok &= callback(motors[2]);
       break;
     case Axis::Z:

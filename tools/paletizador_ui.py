@@ -14,11 +14,11 @@ except ImportError:
 
 
 BAUD = 115200
-AXES = ("X", "Y", "Y1", "Y2", "Z")
+AXES = ("X", "X1", "X2", "Y", "Z")
 MOTOR_AXES = ("X", "Y", "Z")
 ROBOT_AXES = ("X", "Y", "Z")
 STATUS_RE = re.compile(
-    r"^\s*(?P<axis>X|Y1|Y2|Z)\s+id=0x(?P<id>[0-9A-Fa-f]+)\s+"
+    r"^\s*(?P<axis>X1|X2|Y|Z)\s+id=0x(?P<id>[0-9A-Fa-f]+)\s+"
     r"online=(?P<online>[01])\s+angularEnc=(?P<enc>-?\d+|\?)\s+"
     r"linearMm=(?P<mm>-?\d+(?:\.\d+)?|\?)\s+"
     r"rpm=(?P<rpm>-?\d+|\?)\s+"
@@ -185,6 +185,9 @@ class App(tk.Tk):
         ttk.Button(quick, text="PING", command=lambda: self.send("PING")).pack(side="left", padx=(8, 0))
         ttk.Button(quick, text="HELP", command=lambda: self.send("HELP")).pack(side="left", padx=(8, 0))
         ttk.Button(quick, text="STOP", command=lambda: self.send("STOP")).pack(side="left", padx=(8, 0))
+        ttk.Button(quick, text="FAULT STATUS", command=lambda: self.send("FAULT STATUS")).pack(side="left", padx=(8, 0))
+        ttk.Button(quick, text="FAULT RESET", command=lambda: self.send("FAULT RESET")).pack(side="left", padx=(8, 0))
+        ttk.Button(quick, text="FAULT TEST", command=lambda: self.send("FAULT TEST")).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(quick, text="Actualizar estado", variable=self.auto_status_var).pack(side="left", padx=(16, 0))
 
         columns = ("axis", "id", "online", "enc", "mm", "rpm", "acc", "move", "home", "last")
@@ -219,7 +222,7 @@ class App(tk.Tk):
             self.status_table.heading(column, text=headings[column])
             self.status_table.column(column, width=widths[column], anchor="center")
 
-        for axis in ("X", "Y1", "Y2", "Z"):
+        for axis in ("X1", "X2", "Y", "Z"):
             self.status_table.insert("", "end", iid=axis, values=(axis, "-", "NO", "-", "-", "-", "-", "-", "-", "-"))
 
         self.log = tk.Text(root, height=18, wrap="word")

@@ -14,7 +14,9 @@ uint8_t checksum(uint16_t canId, const uint8_t *data, uint8_t len) {
 
 bool begin() {
   twai_general_config_t gConfig = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX, CAN_RX, TWAI_MODE_NORMAL);
-  twai_timing_config_t tConfig = TWAI_TIMING_CONFIG_500KBITS();
+  gConfig.tx_queue_len = 16;
+  gConfig.rx_queue_len = 32;
+  twai_timing_config_t tConfig = TWAI_TIMING_CONFIG_1MBITS();
   twai_filter_config_t fConfig = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
   if (twai_driver_install(&gConfig, &tConfig, &fConfig) != ESP_OK) return false;
@@ -47,6 +49,17 @@ bool verifyChecksum(const twai_message_t &msg) {
   if (msg.data_length_code == 0) return false;
   const uint8_t payloadLen = msg.data_length_code - 1;
   return msg.data[payloadLen] == checksum(msg.identifier, msg.data, payloadLen);
+}
+
+bool waitTxIdle(uint32_t timeoutMs) {
+  const uint32_t startMs = millis();
+  twai_status_info_t status = {};
+  do {
+    if (twai_get_status_info(&status) != ESP_OK) return false;
+    if (status.msgs_to_tx == 0) return true;
+    delay(1);
+  } while (millis() - startMs <= timeoutMs);
+  return false;
 }
 
 }  // namespace mks

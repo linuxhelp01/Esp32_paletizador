@@ -26,5 +26,6 @@ bool begin();
 bool sendFrame(uint16_t canId, const uint8_t *payloadWithoutCrc, uint8_t lenWithoutCrc);
 bool readAnyFrame(twai_message_t &rx, uint32_t timeoutMs = 0);
 bool verifyChecksum(const twai_message_t &msg);
+bool waitTxIdle(uint32_t timeoutMs);
 
 }  // namespace mks

@@ -4,14 +4,19 @@
 #include "mks_can.h"
 
 MotorNode motors[4] = {
-  MotorNode("X", CAN_ID_X, MOTOR_DIR_X),
-  MotorNode("Y1", CAN_ID_Y1, MOTOR_DIR_Y1),
-  MotorNode("Y2", CAN_ID_Y2, MOTOR_DIR_Y2),
+  MotorNode("X1", CAN_ID_PHYSICAL_Y1, MOTOR_DIR_PHYSICAL_Y1),
+  MotorNode("X2", CAN_ID_PHYSICAL_Y2, MOTOR_DIR_PHYSICAL_Y2),
+  MotorNode("Y", CAN_ID_PHYSICAL_X, MOTOR_DIR_PHYSICAL_X),
   MotorNode("Z", CAN_ID_Z, MOTOR_DIR_Z),
 };
 
 static uint32_t lastEncoderPollMs = 0;
-static uint8_t pollIndex = 0;
+static uint32_t lastSpeedPollMs = 0;
+static uint32_t encoderPollingPausedUntilMs = 0;
+static bool safetyFaultActive = false;
+static const char *safetyFaultReason = "OK";
+static bool xPairMotionMonitoringActive = false;
+static int8_t xPairExpectedDirection = 0;
 
 static bool commandStopAll();
 
@@ -46,18 +51,71 @@ static int32_t toMotorSpeed(const MotorNode &motor, int32_t robotRpm) {
   return robotRpm * motor.direction;
 }
 
-static bool isYPairAligned() {
-  const MotorNode &y1 = motors[1];
-  const MotorNode &y2 = motors[2];
-  if (!y1.encoderOk || !y2.encoderOk) {
-    Serial.println("Y ERROR: falta lectura de encoder en Y1 o Y2");
+static void pauseEncoderPolling() {
+  encoderPollingPausedUntilMs = millis() + MOTION_COMMAND_POLL_PAUSE_MS;
+}
+
+static bool sendDriverCommand(uint16_t canId, const uint8_t *cmd, uint8_t len) {
+  pauseEncoderPolling();
+  mks::waitTxIdle(5);
+  for (uint8_t attempt = 0; attempt < CAN_COMMAND_TX_RETRIES; attempt++) {
+    if (mks::sendFrame(canId, cmd, len)) return true;
+    drainCanReplies();
+    mks::waitTxIdle(2);
+    delay(1);
+  }
+  return false;
+}
+
+static int8_t signOfDelta(int64_t value) {
+  if (value > 0) return 1;
+  if (value < 0) return -1;
+  return 0;
+}
+
+static void setSafetyFault(const char *reason) {
+  if (!safetyFaultActive) {
+    Serial.print("SAFETY FAULT: ");
+    Serial.println(reason);
+  }
+  safetyFaultActive = true;
+  safetyFaultReason = reason;
+  xPairMotionMonitoringActive = false;
+  xPairExpectedDirection = 0;
+  commandStopAll();
+}
+
+static bool xPairSamplesCloseEnough(bool report) {
+  const MotorNode &x1 = motors[0];
+  const MotorNode &x2 = motors[1];
+  const uint32_t skewMs = x1.lastEncoderUpdateMs > x2.lastEncoderUpdateMs
+                              ? x1.lastEncoderUpdateMs - x2.lastEncoderUpdateMs
+                              : x2.lastEncoderUpdateMs - x1.lastEncoderUpdateMs;
+  if (skewMs <= X_PAIR_ALIGNMENT_SAMPLE_SKEW_MS) return true;
+  if (report) {
+    Serial.print("X ERROR: muestras X1/X2 no sincronizadas, skewMs=");
+    Serial.println(skewMs);
+  }
+  return false;
+}
+
+static bool isXPairAligned(bool requireFreshSamples = false) {
+  const MotorNode &x1 = motors[0];
+  const MotorNode &x2 = motors[1];
+  if (!x1.encoderOk || !x2.encoderOk) {
+    Serial.println("X ERROR: falta lectura de encoder en X1 o X2");
     commandStopAll();
     return false;
   }
 
-  const int64_t error = y1.encoder - y2.encoder;
-  if (llabs(error) > Y_PAIR_MAX_ERROR_COUNTS) {
-    Serial.print("Y ERROR: Y1/Y2 desalineados, errorEnc=");
+  if (requireFreshSamples && !xPairSamplesCloseEnough(true)) {
+    commandStopAll();
+    return false;
+  }
+
+  const int64_t error = x1.encoder - x2.encoder;
+  if (llabs(error) > X_PAIR_MAX_ERROR_COUNTS) {
+    Serial.print("X ERROR: X1/X2 desalineados, errorEnc=");
     Serial.print(error);
     Serial.print(" errorMm=");
     Serial.println(encoderCountsToMm(error), 3);
@@ -68,22 +126,99 @@ static bool isYPairAligned() {
   return true;
 }
 
+static bool safetyAllowsMotion() {
+  if (!safetyFaultActive) return true;
+  Serial.print("SAFETY ERROR: falla activa, ejecute FAULT RESET. motivo=");
+  Serial.println(safetyFaultReason);
+  commandStopAll();
+  return false;
+}
+
 static bool axisIsSafeForMotion(Axis axis) {
-  if (axis == Axis::Y1 || axis == Axis::Y2) {
-    Serial.println("Y ERROR: Y1 y Y2 no se mueven por separado. Usa eje Y.");
+  if (!safetyAllowsMotion()) return false;
+  if (axis == Axis::X1 || axis == Axis::X2) {
+    Serial.println("X ERROR: X1 y X2 no se mueven por separado. Usa eje X.");
     return false;
   }
-  if (axis == Axis::Y) return isYPairAligned();
+  if (axis == Axis::X) return isXPairAligned();
   return axis != Axis::UNKNOWN;
+}
+
+static void setXPairExpectedDirectionFromSpeed(int32_t rpm) {
+  xPairMotionMonitoringActive = true;
+  xPairExpectedDirection = signOfDelta(rpm);
+}
+
+static void setXPairExpectedDirectionFromTarget(int32_t target) {
+  xPairMotionMonitoringActive = true;
+  const MotorNode &x1 = motors[0];
+  const MotorNode &x2 = motors[1];
+  if (!x1.encoderOk || !x2.encoderOk) {
+    xPairExpectedDirection = 0;
+    return;
+  }
+
+  const int64_t average = (x1.encoder + x2.encoder) / 2;
+  const int64_t delta = static_cast<int64_t>(target) - average;
+  xPairExpectedDirection = signOfDelta(delta);
+}
+
+static void clearXPairExpectedDirectionIfAxis(Axis axis) {
+  if (axis == Axis::X) {
+    xPairMotionMonitoringActive = false;
+    xPairExpectedDirection = 0;
+  }
+}
+
+static void verifyXPairDirectionSafety() {
+  if (safetyFaultActive || !xPairMotionMonitoringActive) return;
+  const MotorNode &x1 = motors[0];
+  const MotorNode &x2 = motors[1];
+  if (!x1.encoderOk || !x2.encoderOk) return;
+  if (!xPairSamplesCloseEnough(false)) return;
+  
+  if (!isXPairAligned()) {
+    setSafetyFault("X1/X2 fuera de alineacion");
+    return;
+  }
+
+  const int64_t delta1 = x1.encoder - x1.previousEncoder;
+  const int64_t delta2 = x2.encoder - x2.previousEncoder;
+  const bool x1Moved = llabs(delta1) >= X_PAIR_DIRECTION_MIN_DELTA_COUNTS;
+  const bool x2Moved = llabs(delta2) >= X_PAIR_DIRECTION_MIN_DELTA_COUNTS;
+  const int8_t dir1 = signOfDelta(delta1);
+  const int8_t dir2 = signOfDelta(delta2);
+
+  if (x1Moved && x2Moved && dir1 != dir2) {
+    setSafetyFault("X1/X2 se mueven en sentidos opuestos");
+    return;
+  }
+
+  if (xPairExpectedDirection != 0 &&
+      ((x1Moved && dir1 != xPairExpectedDirection) || (x2Moved && dir2 != xPairExpectedDirection))) {
+    setSafetyFault("eje X doble se mueve contra el sentido comandado");
+  }
+}
+
+static bool resetSafetyFault() {
+  commandStopAll();
+  xPairMotionMonitoringActive = false;
+  xPairExpectedDirection = 0;
+  if (!isXPairAligned()) return false;
+
+  safetyFaultActive = false;
+  safetyFaultReason = "OK";
+  Serial.println("SAFETY RESET OK: falla liberada, funcionamiento normal habilitado.");
+  return true;
 }
 
 Axis parseAxis(String token) {
   token.trim();
   token.toUpperCase();
   if (token == "X") return Axis::X;
+  if (token == "X1") return Axis::X1;
+  if (token == "X2") return Axis::X2;
   if (token == "Y") return Axis::Y;
-  if (token == "Y1") return Axis::Y1;
-  if (token == "Y2") return Axis::Y2;
   if (token == "Z") return Axis::Z;
   return Axis::UNKNOWN;
 }
@@ -144,14 +279,14 @@ static bool commandSpeed(MotorNode &motor, int32_t rpm, uint8_t acc) {
   uint8_t speedLow = 0;
   encodeSpeed(toMotorSpeed(motor, rpm), speedHigh, speedLow);
   const uint8_t cmd[] = {mks::CMD_RUN_SPEED, speedHigh, speedLow, acc};
-  const bool ok = mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  const bool ok = sendDriverCommand(motor.canId, cmd, sizeof(cmd));
   if (ok) motor.lastAcc = acc;
   return ok;
 }
 
 static bool commandEmergencyStop(MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_EMERGENCY_STOP};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool commandStopAll() {
@@ -164,41 +299,45 @@ static bool commandStopAll() {
 
 static bool commandHome(MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_HOME, 0x00};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool commandSetZero(MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_SET_ZERO};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool commandSetBusFocMode(MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_SET_MODE, 0x05};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool commandSetBusFocModeBroadcast() {
   const uint8_t cmd[] = {mks::CMD_SET_MODE, 0x05};
-  return mks::sendFrame(mks::CAN_ID_BROADCAST, cmd, sizeof(cmd));
+  return sendDriverCommand(mks::CAN_ID_BROADCAST, cmd, sizeof(cmd));
 }
 
 static bool commandEnableSyncBroadcast(bool enable) {
   const uint8_t cmd[] = {mks::CMD_SYNC_ENABLE, static_cast<uint8_t>(enable ? 0x01 : 0x00)};
-  return mks::sendFrame(mks::CAN_ID_BROADCAST, cmd, sizeof(cmd));
+  return sendDriverCommand(mks::CAN_ID_BROADCAST, cmd, sizeof(cmd));
 }
 
 static bool commandSyncTrigger() {
+  if (!mks::waitTxIdle(10)) return false;
   const uint8_t cmd[] = {mks::CMD_SYNC_TRIGGER};
   bool ok = true;
   for (uint8_t i = 0; i < 3; i++) {
-    ok &= mks::sendFrame(mks::CAN_ID_BROADCAST, cmd, sizeof(cmd));
+    ok &= sendDriverCommand(mks::CAN_ID_BROADCAST, cmd, sizeof(cmd));
     delay(1);
   }
   return ok;
 }
 
 static bool commandPrepareSynchronizedMove() {
-  const bool ok = commandEnableSyncBroadcast(true);
+  pauseEncoderPolling();
+  drainCanReplies();
+  const bool idle = mks::waitTxIdle(10);
+  const bool ok = idle && commandEnableSyncBroadcast(true);
   delay(2);
   return ok;
 }
@@ -219,7 +358,7 @@ static bool commandAbsolutePosition(MotorNode &motor, int32_t encoderTarget, uin
     static_cast<uint8_t>(coord24 & 0xFF),
   };
 
-  const bool ok = mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  const bool ok = sendDriverCommand(motor.canId, cmd, sizeof(cmd));
   if (ok) motor.lastAcc = acc;
   return ok;
 }
@@ -246,9 +385,12 @@ static void handleEncoderReply(MotorNode &motor, const twai_message_t &msg) {
   }
 
   motor.rawEncoder = value;
+  motor.previousEncoder = motor.encoder;
   motor.encoder = value * motor.direction;
   motor.encoderOk = true;
-  motor.lastSeenMs = millis();
+  motor.lastEncoderUpdateMs = millis();
+  motor.lastSeenMs = motor.lastEncoderUpdateMs;
+  verifyXPairDirectionSafety();
 }
 
 static void handleSpeedReply(MotorNode &motor, const twai_message_t &msg) {
@@ -303,15 +445,22 @@ void drainCanReplies() {
 }
 
 void pollEncoders() {
-  if (millis() - lastEncoderPollMs < ENCODER_POLL_MS) return;
-  lastEncoderPollMs = millis();
+  const uint32_t now = millis();
+  if (static_cast<int32_t>(now - encoderPollingPausedUntilMs) < 0) return;
 
-  MotorNode &motor = motors[pollIndex];
-  requestEncoder(motor);
-  requestSpeed(motor);
+  if (now - lastEncoderPollMs >= ENCODER_POLL_MS) {
+    lastEncoderPollMs = now;
+    for (const MotorNode &motor : motors) {
+      requestEncoder(motor);
+    }
+  }
 
-  pollIndex++;
-  if (pollIndex >= (sizeof(motors) / sizeof(motors[0]))) pollIndex = 0;
+  if (now - lastSpeedPollMs >= SPEED_POLL_MS) {
+    lastSpeedPollMs = now;
+    for (const MotorNode &motor : motors) {
+      requestSpeed(motor);
+    }
+  }
 }
 
 void printHelp() {
@@ -321,7 +470,7 @@ void printHelp() {
   Serial.println("  POS <X|Y|Z> <encoder_abs> [rpm] [acc]");
   Serial.println("      Posicion angular absoluta del motor en cuentas de encoder.");
   Serial.println("  POSANG <X|Y|Z> <encoder_abs> [rpm] [rpm_s]");
-  Serial.println("      Posicion angular. En Y mueve Y1/Y2 juntos.");
+  Serial.println("      Posicion angular. En X mueve X1/X2 juntos.");
   Serial.println("  POSMM <X|Y|Z> <mm_abs> [rpm] [acc]");
   Serial.println("      Posicion lineal absoluta del extremo del robot en milimetros.");
   Serial.println("  POSLINE <X|Y|Z> <mm_abs> [mm_s] [mm_s2]");
@@ -332,17 +481,24 @@ void printHelp() {
   Serial.println("  TRIGGER            (disparo sincronizado MKS 4Bh por broadcast)");
   Serial.println("  VEL <X|Y|Z> <rpm> [acc]");
   Serial.println("  VELANG <X|Y|Z> <rpm> [rpm_s]");
-  Serial.println("  HOME Y            (homing simultaneo Y1/Y2)");
+  Serial.println("  HOME X            (homing simultaneo X1/X2)");
   Serial.println("  HOME <X|Y|Z>");
   Serial.println("  ZERO <X|Y|Z>");
   Serial.println("  PING              (fuerza consulta CAN a todos los motores)");
   Serial.println("  STOP");
+  Serial.println("  FAULT STATUS      (muestra el estado de seguridad)");
+  Serial.println("  FAULT RESET       (libera falla si X1/X2 tienen encoder valido y estan alineados)");
+  Serial.println("  FAULT TEST        (simula falla del eje X doble para probar enclavamiento)");
   Serial.println("  STATUS");
   Serial.println();
 }
 
 void printStatus() {
   Serial.println("STATUS");
+  Serial.print("  safetyFault=");
+  Serial.print(safetyFaultActive ? 1 : 0);
+  Serial.print(" reason=");
+  Serial.println(safetyFaultReason);
   const uint32_t now = millis();
   for (const MotorNode &motor : motors) {
     const bool online = motor.lastSeenMs > 0 && (now - motor.lastSeenMs) <= MOTOR_ONLINE_TIMEOUT_MS;
@@ -399,6 +555,28 @@ void handleMachineCommand(String line) {
     return;
   }
 
+  if (command == "FAULT") {
+    String subCommand = nextToken(line);
+    subCommand.toUpperCase();
+    if (subCommand == "STATUS" || subCommand.length() == 0) {
+      Serial.print("SAFETY ");
+      Serial.print(safetyFaultActive ? "FAULT " : "OK ");
+      Serial.println(safetyFaultReason);
+      return;
+    }
+    if (subCommand == "RESET") {
+      reportCommandResult("FAULT RESET", resetSafetyFault());
+      return;
+    }
+    if (subCommand == "TEST") {
+      setSafetyFault("test manual de seguridad del eje X doble");
+      reportCommandResult("FAULT TEST", safetyFaultActive);
+      return;
+    }
+    Serial.println("FAULT ERROR: usa FAULT STATUS, FAULT RESET o FAULT TEST.");
+    return;
+  }
+
   if (command == "PING") {
     bool ok = true;
     for (const MotorNode &motor : motors) {
@@ -422,6 +600,8 @@ void handleMachineCommand(String line) {
   }
 
   if (command == "STOP") {
+    xPairMotionMonitoringActive = false;
+    xPairExpectedDirection = 0;
     reportCommandResult("STOP", commandStopAll());
     return;
   }
@@ -435,11 +615,13 @@ void handleMachineCommand(String line) {
       return;
     }
 
+    if (axis == Axis::X) setXPairExpectedDirectionFromSpeed(rpm);
     bool ok = commandPrepareSynchronizedMove();
     ok &= forEachMotorInAxis(axis, [rpm, acc](MotorNode &motor) {
       return commandSpeed(motor, rpm, acc);
     });
     if (ok) ok &= commandSyncTrigger();
+    if (!ok) clearXPairExpectedDirectionIfAxis(axis);
     reportCommandResult("VEL", ok);
     return;
   }
@@ -453,11 +635,13 @@ void handleMachineCommand(String line) {
       return;
     }
 
+    if (axis == Axis::X) setXPairExpectedDirectionFromSpeed(rpm);
     bool ok = commandPrepareSynchronizedMove();
     ok &= forEachMotorInAxis(axis, [rpm, acc](MotorNode &motor) {
       return commandSpeed(motor, rpm, acc);
     });
     if (ok) ok &= commandSyncTrigger();
+    if (!ok) clearXPairExpectedDirectionIfAxis(axis);
     reportCommandResult("VELANG", ok);
     return;
   }
@@ -472,11 +656,13 @@ void handleMachineCommand(String line) {
       return;
     }
 
+    if (axis == Axis::X) setXPairExpectedDirectionFromTarget(target);
     bool ok = commandPrepareSynchronizedMove();
     ok &= forEachMotorInAxis(axis, [target, rpm, acc](MotorNode &motor) {
       return commandAbsolutePosition(motor, target, rpm, acc);
     });
     if (ok) ok &= commandSyncTrigger();
+    if (!ok) clearXPairExpectedDirectionIfAxis(axis);
     reportCommandResult("POS", ok);
     return;
   }
@@ -491,11 +677,13 @@ void handleMachineCommand(String line) {
       return;
     }
 
+    if (axis == Axis::X) setXPairExpectedDirectionFromTarget(target);
     bool ok = commandPrepareSynchronizedMove();
     ok &= forEachMotorInAxis(axis, [target, rpm, acc](MotorNode &motor) {
       return commandAbsolutePosition(motor, target, rpm, acc);
     });
     if (ok) ok &= commandSyncTrigger();
+    if (!ok) clearXPairExpectedDirectionIfAxis(axis);
     reportCommandResult("POSANG", ok);
     return;
   }
@@ -510,11 +698,13 @@ void handleMachineCommand(String line) {
       return;
     }
 
+    if (axis == Axis::X) setXPairExpectedDirectionFromTarget(target);
     bool ok = commandPrepareSynchronizedMove();
     ok &= forEachMotorInAxis(axis, [target, rpm, acc](MotorNode &motor) {
       return commandAbsolutePosition(motor, target, rpm, acc);
     });
     if (ok) ok &= commandSyncTrigger();
+    if (!ok) clearXPairExpectedDirectionIfAxis(axis);
     reportCommandResult("POSMM", ok);
     return;
   }
@@ -529,11 +719,13 @@ void handleMachineCommand(String line) {
       return;
     }
 
+    if (axis == Axis::X) setXPairExpectedDirectionFromTarget(target);
     bool ok = commandPrepareSynchronizedMove();
     ok &= forEachMotorInAxis(axis, [target, rpm, acc](MotorNode &motor) {
       return commandAbsolutePosition(motor, target, rpm, acc);
     });
     if (ok) ok &= commandSyncTrigger();
+    if (!ok) clearXPairExpectedDirectionIfAxis(axis);
     reportCommandResult("POSLINE", ok);
     return;
   }
@@ -544,45 +736,64 @@ void handleMachineCommand(String line) {
     const int32_t zTarget = mmToEncoderCounts(nextToken(line).toFloat());
     uint16_t rpm = line.length() ? linearSpeedMmSToRpm(nextToken(line).toFloat()) : DEFAULT_RPM;
     uint8_t acc = line.length() ? linearAccelMmS2ToMksAcc(nextToken(line).toFloat()) : DEFAULT_ACC;
-    if (!isYPairAligned()) {
+    if (!safetyAllowsMotion() || !isXPairAligned()) {
       reportCommandResult("POSXYZ", false);
       return;
     }
 
+    setXPairExpectedDirectionFromTarget(xTarget);
     bool ok = commandPrepareSynchronizedMove();
     ok &= commandAbsolutePosition(motors[0], xTarget, rpm, acc);
-    ok &= commandAbsolutePosition(motors[1], yTarget, rpm, acc);
+    ok &= commandAbsolutePosition(motors[1], xTarget, rpm, acc);
     ok &= commandAbsolutePosition(motors[2], yTarget, rpm, acc);
     ok &= commandAbsolutePosition(motors[3], zTarget, rpm, acc);
     if (ok) ok &= commandSyncTrigger();
+    if (!ok) {
+      xPairMotionMonitoringActive = false;
+      xPairExpectedDirection = 0;
+    }
     reportCommandResult("POSXYZ", ok);
     return;
   }
 
   if (command == "HOME") {
     Axis axis = parseAxis(nextToken(line));
-    if (axis == Axis::Y1 || axis == Axis::Y2 || axis == Axis::UNKNOWN) {
-      Serial.println("Y ERROR: usa HOME Y para referenciar Y1/Y2 juntos.");
+    if (!safetyAllowsMotion()) {
       reportCommandResult("HOME", false);
       return;
+    }
+    if (axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) {
+      Serial.println("X ERROR: usa HOME X para referenciar X1/X2 juntos.");
+      reportCommandResult("HOME", false);
+      return;
+    }
+    if (axis == Axis::X) {
+      xPairMotionMonitoringActive = true;
+      xPairExpectedDirection = 0;
     }
     bool ok = forEachMotorInAxis(axis, [](MotorNode &motor) {
       return commandHome(motor);
     });
+    if (!ok) clearXPairExpectedDirectionIfAxis(axis);
     reportCommandResult("HOME", ok);
     return;
   }
 
   if (command == "ZERO") {
     Axis axis = parseAxis(nextToken(line));
-    if (axis == Axis::Y1 || axis == Axis::Y2 || axis == Axis::UNKNOWN) {
-      Serial.println("Y ERROR: usa ZERO Y para ajustar cero en Y1/Y2 juntos.");
+    if (!safetyAllowsMotion()) {
+      reportCommandResult("ZERO", false);
+      return;
+    }
+    if (axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) {
+      Serial.println("X ERROR: usa ZERO X para ajustar cero en X1/X2 juntos.");
       reportCommandResult("ZERO", false);
       return;
     }
     bool ok = forEachMotorInAxis(axis, [](MotorNode &motor) {
       return commandSetZero(motor);
     });
+    clearXPairExpectedDirectionIfAxis(axis);
     reportCommandResult("ZERO", ok);
     return;
   }

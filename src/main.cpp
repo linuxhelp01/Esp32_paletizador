@@ -26,7 +26,7 @@ void setup() {
     return;
   }
 
-  Serial.println("CAN/TWAI iniciado a 500 kbit/s");
+  Serial.println("CAN/TWAI iniciado a 1 Mbit/s");
   printHelp();
 }
 
