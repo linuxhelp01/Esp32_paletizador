@@ -36,6 +36,10 @@ extern MotorNode motors[4];
 bool beginMachine();
 void pollEncoders();
 void drainCanReplies();
+bool stopAllMotors();
+bool safetyFaultIsActive();
+const char *safetyFaultText();
+bool motorIsOnline(const MotorNode &motor, uint32_t nowMs);
 
 void printHelp();
 void printStatus();

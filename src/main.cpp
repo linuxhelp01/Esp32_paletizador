@@ -1,7 +1,7 @@
 #include <Arduino.h>
-
 #include "config.h"
 #include "machine.h"
+#include "ros_bridge.h"
 #include "serial_commands.h"
 
 // =====================================================
@@ -18,20 +18,34 @@ void setup() {
   Serial.begin(SERIAL_BAUD);
   delay(1000);
 
+#if !ENABLE_MICRO_ROS
   Serial.println();
   Serial.println("ESP32-S3 paletizador cartesiano CAN/TWAI");
+#endif
 
   if (!beginMachine()) {
+#if !ENABLE_MICRO_ROS
     Serial.println("ERROR iniciando CAN/TWAI");
+#endif
     return;
   }
 
+#if !ENABLE_MICRO_ROS
   Serial.println("CAN/TWAI iniciado a 1 Mbit/s");
+#endif
+
+#if ENABLE_MICRO_ROS
+  beginRosBridge();
+#else
   printHelp();
+#endif
 }
 
 void loop() {
+#if !ENABLE_MICRO_ROS
   handleSerialInput();
+#endif
   pollEncoders();
   drainCanReplies();
+  spinRosBridge();
 }

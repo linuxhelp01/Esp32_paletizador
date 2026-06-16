@@ -297,6 +297,24 @@ static bool commandStopAll() {
   return ok;
 }
 
+bool stopAllMotors() {
+  xPairMotionMonitoringActive = false;
+  xPairExpectedDirection = 0;
+  return commandStopAll();
+}
+
+bool safetyFaultIsActive() {
+  return safetyFaultActive;
+}
+
+const char *safetyFaultText() {
+  return safetyFaultReason;
+}
+
+bool motorIsOnline(const MotorNode &motor, uint32_t nowMs) {
+  return motor.lastSeenMs > 0 && (nowMs - motor.lastSeenMs) <= MOTOR_ONLINE_TIMEOUT_MS;
+}
+
 static bool commandHome(MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_HOME, 0x00};
   return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
@@ -501,7 +519,7 @@ void printStatus() {
   Serial.println(safetyFaultReason);
   const uint32_t now = millis();
   for (const MotorNode &motor : motors) {
-    const bool online = motor.lastSeenMs > 0 && (now - motor.lastSeenMs) <= MOTOR_ONLINE_TIMEOUT_MS;
+    const bool online = motorIsOnline(motor, now);
     Serial.print("  ");
     Serial.print(motor.name);
     Serial.print(" id=0x");
