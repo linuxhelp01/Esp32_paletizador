@@ -37,6 +37,7 @@ static rcl_publisher_t motorRpmPublisher;
 static rcl_publisher_t statusPublisher;
 static rcl_publisher_t faultPublisher;
 static rcl_subscription_t emergencyStopSubscriber;
+static rcl_subscription_t commandSubscriber;
 static rclc_action_server_t moveActionServer;
 
 static sensor_msgs__msg__JointState jointStateMsg;
@@ -45,6 +46,7 @@ static std_msgs__msg__Float32MultiArray motorRpmMsg;
 static std_msgs__msg__String statusMsg;
 static std_msgs__msg__String faultMsg;
 static std_msgs__msg__Bool emergencyStopMsg;
+static std_msgs__msg__String commandMsg;
 static palletizer_msgs__action__MoveXYZ_SendGoal_Request moveGoalRequest;
 static palletizer_msgs__action__MoveXYZ_FeedbackMessage moveFeedbackMsg;
 static palletizer_msgs__action__MoveXYZ_GetResult_Response moveResultResponse;
@@ -55,8 +57,9 @@ static double jointVelocities[4];
 static double jointEfforts[4];
 static float axisPositionsMm[3];
 static float motorRpms[4];
-static char statusBuffer[512];
+static char statusBuffer[1536];
 static char faultBuffer[96];
+static char commandBuffer[128];
 static char moveFeedbackStateBuffer[96];
 static char moveResultMessageBuffer[96];
 static char frameIdBuffer[] = "palletizer_base";
@@ -74,6 +77,7 @@ static bool motorRpmPublisherInitialized = false;
 static bool statusPublisherInitialized = false;
 static bool faultPublisherInitialized = false;
 static bool emergencyStopSubscriberInitialized = false;
+static bool commandSubscriberInitialized = false;
 static bool moveActionServerInitialized = false;
 static uint32_t lastRosReconnectAttemptMs = 0;
 static uint32_t lastRosHealthCheckMs = 0;
@@ -115,6 +119,7 @@ static void zeroRosHandles() {
   statusPublisher = rcl_get_zero_initialized_publisher();
   faultPublisher = rcl_get_zero_initialized_publisher();
   emergencyStopSubscriber = rcl_get_zero_initialized_subscription();
+  commandSubscriber = rcl_get_zero_initialized_subscription();
   moveActionServer = {};
 }
 
@@ -138,6 +143,7 @@ static void resetRosInitFlags() {
   statusPublisherInitialized = false;
   faultPublisherInitialized = false;
   emergencyStopSubscriberInitialized = false;
+  commandSubscriberInitialized = false;
   moveActionServerInitialized = false;
 }
 
@@ -147,6 +153,7 @@ static void disconnectRosBridge() {
 
   if (executorInitialized) ignoreRclRet(rclc_executor_fini(&executor));
   if (moveActionServerInitialized) ignoreRclRet(rclc_action_server_fini(&moveActionServer, &node));
+  if (commandSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&commandSubscriber, &node));
   if (emergencyStopSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&emergencyStopSubscriber, &node));
   if (faultPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&faultPublisher, &node));
   if (statusPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&statusPublisher, &node));
@@ -306,8 +313,8 @@ static void fillTelemetryMessages() {
     jointPositions[i] = snapshot.encoderOk[i]
                             ? static_cast<double>(snapshot.motorPositionMm[i]) / 1000.0
                             : 0.0;
-    jointVelocities[i] = snapshot.rpmOk[i]
-                             ? static_cast<double>(snapshot.motorRpm[i]) * LEADSCREW_MM_PER_REV / 60000.0
+    jointVelocities[i] = snapshot.encoderOk[i]
+                             ? static_cast<double>(snapshot.motorVelocityMmS[i]) / 1000.0
                              : 0.0;
     jointEfforts[i] = 0.0;
     motorRpms[i] = snapshot.rpmOk[i] ? static_cast<float>(snapshot.motorRpm[i]) : 0.0f;
@@ -320,29 +327,67 @@ static void fillTelemetryMessages() {
   const int written = snprintf(
       statusBuffer,
       sizeof(statusBuffer),
-      "{\"fault\":%u,\"reason\":\"%s\",\"online\":[%u,%u,%u,%u],\"enc\":[%lld,%lld,%lld,%lld],\"mm\":[%.3f,%.3f,%.3f,%.3f],\"rpm\":[%d,%d,%d,%d],\"acc\":[%u,%u,%u,%u],\"moveStatus\":[%u,%u,%u,%u],\"homeStatus\":[%u,%u,%u,%u]}",
+      "{\"fault\":%u,\"reason\":\"%s\",\"homing\":\"%s\",\"online\":[%u,%u,%u,%u],\"enabledOk\":[%u,%u,%u,%u],\"enabled\":[%u,%u,%u,%u],\"stalled\":[%u,%u,%u,%u],\"raw35Ok\":[%u,%u,%u,%u],\"angleOk\":[%u,%u,%u,%u],\"enc31\":[%lld,%lld,%lld,%lld],\"raw35\":[%lld,%lld,%lld,%lld],\"mm\":[%.3f,%.3f,%.3f,%.3f],\"vel_mm_s\":[%.3f,%.3f,%.3f,%.3f],\"rpm\":[%d,%d,%d,%d],\"angleError\":[%ld,%ld,%ld,%ld],\"limits\":[[%u,%.3f,%.3f],[%u,%.3f,%.3f],[%u,%.3f,%.3f]],\"moveStatus\":[%u,%u,%u,%u],\"home91\":[%u,%u,%u,%u],\"home3B\":[[%u,%u],[%u,%u],[%u,%u],[%u,%u]]}",
       snapshot.safetyFault ? 1 : 0,
       snapshot.safetyReason,
+      snapshot.homingState,
       snapshot.motorOnline[0] ? 1 : 0,
       snapshot.motorOnline[1] ? 1 : 0,
       snapshot.motorOnline[2] ? 1 : 0,
       snapshot.motorOnline[3] ? 1 : 0,
+      snapshot.enabledOk[0] ? 1 : 0,
+      snapshot.enabledOk[1] ? 1 : 0,
+      snapshot.enabledOk[2] ? 1 : 0,
+      snapshot.enabledOk[3] ? 1 : 0,
+      snapshot.enabled[0] ? 1 : 0,
+      snapshot.enabled[1] ? 1 : 0,
+      snapshot.enabled[2] ? 1 : 0,
+      snapshot.enabled[3] ? 1 : 0,
+      snapshot.stalled[0] ? 1 : 0,
+      snapshot.stalled[1] ? 1 : 0,
+      snapshot.stalled[2] ? 1 : 0,
+      snapshot.stalled[3] ? 1 : 0,
+      snapshot.rawEncoderOk[0] ? 1 : 0,
+      snapshot.rawEncoderOk[1] ? 1 : 0,
+      snapshot.rawEncoderOk[2] ? 1 : 0,
+      snapshot.rawEncoderOk[3] ? 1 : 0,
+      snapshot.angleErrorOk[0] ? 1 : 0,
+      snapshot.angleErrorOk[1] ? 1 : 0,
+      snapshot.angleErrorOk[2] ? 1 : 0,
+      snapshot.angleErrorOk[3] ? 1 : 0,
       static_cast<long long>(snapshot.encoder[0]),
       static_cast<long long>(snapshot.encoder[1]),
       static_cast<long long>(snapshot.encoder[2]),
       static_cast<long long>(snapshot.encoder[3]),
+      static_cast<long long>(snapshot.rawDiagnosticEncoder[0]),
+      static_cast<long long>(snapshot.rawDiagnosticEncoder[1]),
+      static_cast<long long>(snapshot.rawDiagnosticEncoder[2]),
+      static_cast<long long>(snapshot.rawDiagnosticEncoder[3]),
       snapshot.motorPositionMm[0],
       snapshot.motorPositionMm[1],
       snapshot.motorPositionMm[2],
       snapshot.motorPositionMm[3],
+      snapshot.motorVelocityMmS[0],
+      snapshot.motorVelocityMmS[1],
+      snapshot.motorVelocityMmS[2],
+      snapshot.motorVelocityMmS[3],
       snapshot.motorRpm[0],
       snapshot.motorRpm[1],
       snapshot.motorRpm[2],
       snapshot.motorRpm[3],
-      snapshot.lastAcc[0],
-      snapshot.lastAcc[1],
-      snapshot.lastAcc[2],
-      snapshot.lastAcc[3],
+      static_cast<long>(snapshot.angleError[0]),
+      static_cast<long>(snapshot.angleError[1]),
+      static_cast<long>(snapshot.angleError[2]),
+      static_cast<long>(snapshot.angleError[3]),
+      snapshot.axisLimitsConfigured[0] ? 1 : 0,
+      snapshot.axisMinMm[0],
+      snapshot.axisMaxMm[0],
+      snapshot.axisLimitsConfigured[1] ? 1 : 0,
+      snapshot.axisMinMm[1],
+      snapshot.axisMaxMm[1],
+      snapshot.axisLimitsConfigured[2] ? 1 : 0,
+      snapshot.axisMinMm[2],
+      snapshot.axisMaxMm[2],
       snapshot.moveStatus[0],
       snapshot.moveStatus[1],
       snapshot.moveStatus[2],
@@ -350,7 +395,15 @@ static void fillTelemetryMessages() {
       snapshot.homeStatus[0],
       snapshot.homeStatus[1],
       snapshot.homeStatus[2],
-      snapshot.homeStatus[3]);
+      snapshot.homeStatus[3],
+      snapshot.homeStatusSingleTurn[0],
+      snapshot.homeStatusOrigin[0],
+      snapshot.homeStatusSingleTurn[1],
+      snapshot.homeStatusOrigin[1],
+      snapshot.homeStatusSingleTurn[2],
+      snapshot.homeStatusOrigin[2],
+      snapshot.homeStatusSingleTurn[3],
+      snapshot.homeStatusOrigin[3]);
   statusMsg.data.size = written > 0 ? min(static_cast<size_t>(written), sizeof(statusBuffer) - 1) : 0;
 
   const int faultWritten = snprintf(
@@ -441,6 +494,14 @@ static void onEmergencyStop(const void *msgIn) {
   if (msg->data) {
     robotRequestEmergencyStop();
   }
+}
+
+static void onCommand(const void *msgIn) {
+  const std_msgs__msg__String *msg = static_cast<const std_msgs__msg__String *>(msgIn);
+  const size_t size = msg->data.size < sizeof(commandBuffer) - 1 ? msg->data.size : sizeof(commandBuffer) - 1;
+  memcpy(commandBuffer, msg->data.data, size);
+  commandBuffer[size] = '\0';
+  robotRequestCommandText(commandBuffer);
 }
 
 static rcl_ret_t onMoveGoal(rclc_action_goal_handle_t *goalHandle, void *) {
@@ -534,6 +595,7 @@ static void initMessages() {
 
   setString(statusMsg.data, statusBuffer, sizeof(statusBuffer));
   setString(faultMsg.data, faultBuffer, sizeof(faultBuffer));
+  setString(commandMsg.data, commandBuffer, sizeof(commandBuffer));
   setString(moveFeedbackMsg.feedback.state, moveFeedbackStateBuffer, sizeof(moveFeedbackStateBuffer));
   setString(moveResultResponse.result.message, moveResultMessageBuffer, sizeof(moveResultMessageBuffer));
 }
@@ -621,6 +683,14 @@ bool beginRosBridge() {
     return false;
   }
   emergencyStopSubscriberInitialized = true;
+  if (!check(rclc_subscription_init_best_effort(
+          &commandSubscriber, &node,
+          ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+          "/palletizer/command"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  commandSubscriberInitialized = true;
   if (!check(rclc_action_server_init_default(
           &moveActionServer,
           &node,
@@ -644,7 +714,7 @@ bool beginRosBridge() {
   }
   telemetryTimerInitialized = true;
 
-  if (!check(rclc_executor_init(&executor, &support.context, 3, &allocator))) {
+  if (!check(rclc_executor_init(&executor, &support.context, 4, &allocator))) {
     disconnectRosBridge();
     return false;
   }
@@ -658,6 +728,15 @@ bool beginRosBridge() {
           &emergencyStopSubscriber,
           &emergencyStopMsg,
           onEmergencyStop,
+          ON_NEW_DATA))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_subscription(
+          &executor,
+          &commandSubscriber,
+          &commandMsg,
+          onCommand,
           ON_NEW_DATA))) {
     disconnectRosBridge();
     return false;

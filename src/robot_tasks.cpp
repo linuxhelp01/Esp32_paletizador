@@ -10,6 +10,7 @@
 enum class RobotCommandType : uint8_t {
   MOVE_XYZ,
   STOP,
+  TEXT,
 };
 
 struct RobotCommand {
@@ -20,6 +21,7 @@ struct RobotCommand {
   float zMm = 0.0f;
   float speedMmS = 0.0f;
   float accelMmS2 = 0.0f;
+  char text[128] = "";
 };
 
 static QueueHandle_t robotCommandQueue = nullptr;
@@ -72,6 +74,11 @@ static void publishSnapshot() {
   next.axisPositionMm[1] = yMm;
   next.axisPositionMm[2] = zMm;
   next.axisPositionsValid = axisPositionsAreValid();
+  next.axisLimitsConfigured[0] = getAxisLimits(Axis::X, next.axisMinMm[0], next.axisMaxMm[0]);
+  next.axisLimitsConfigured[1] = getAxisLimits(Axis::Y, next.axisMinMm[1], next.axisMaxMm[1]);
+  next.axisLimitsConfigured[2] = getAxisLimits(Axis::Z, next.axisMinMm[2], next.axisMaxMm[2]);
+  next.homingActive = homingIsActive();
+  snprintf(next.homingState, sizeof(next.homingState), "%s", homingStateText());
   next.safetyFault = safetyFaultIsActive();
   snprintf(next.safetyReason, sizeof(next.safetyReason), "%s", safetyFaultText());
   next.stampMs = now;
@@ -79,14 +86,26 @@ static void publishSnapshot() {
   for (size_t i = 0; i < 4; i++) {
     const MotorNode &motor = motors[i];
     next.encoder[i] = motor.encoderOk ? motor.encoder : 0;
+    next.rawDiagnosticEncoder[i] = motor.rawEncoderOk ? motor.diagnosticRawEncoder : 0;
     next.motorPositionMm[i] = motor.encoderOk ? encoderCountsToMm(motor.encoder) : 0.0f;
+    next.motorVelocityMmS[i] = motor.encoderOk ? motor.velocityMmS : 0.0f;
     next.motorRpm[i] = motor.rpmOk ? motor.rpm : 0;
+    next.angleError[i] = motor.angleErrorOk ? motor.angleError : 0;
     next.lastAcc[i] = motor.lastAcc;
     next.moveStatus[i] = motor.moveStatus;
     next.homeStatus[i] = motor.homeStatus;
+    next.homeStatusSingleTurn[i] = motor.homeStatusSingleTurn;
+    next.homeStatusOrigin[i] = motor.homeStatusOrigin;
+    next.enabled[i] = motor.enabled;
+    next.stalled[i] = motor.stalled;
     next.motorOnline[i] = motorIsOnline(motor, now);
     next.encoderOk[i] = motor.encoderOk;
+    next.rawEncoderOk[i] = motor.rawEncoderOk;
     next.rpmOk[i] = motor.rpmOk;
+    next.angleErrorOk[i] = motor.angleErrorOk;
+    next.enabledOk[i] = motor.enabledOk;
+    next.stallOk[i] = motor.stallOk;
+    next.homeStatusOk[i] = motor.homeStatusOk;
   }
 
   portENTER_CRITICAL(&snapshotMux);
@@ -109,6 +128,9 @@ static void processRobotCommand(const RobotCommand &command) {
     case RobotCommandType::STOP:
       stopAllMotors();
       break;
+    case RobotCommandType::TEXT:
+      handleMachineCommand(String(command.text));
+      break;
   }
 }
 
@@ -120,6 +142,7 @@ static void controlTask(void *) {
 
     pollEncoders();
     drainCanReplies();
+    serviceMachine();
 
     RobotCommand command;
     while (robotCommandQueue && xQueueReceive(robotCommandQueue, &command, 0) == pdTRUE) {
@@ -203,9 +226,10 @@ bool robotRequestMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, floa
   if (nextCommandId == 0) nextCommandId = 1;
   portEXIT_CRITICAL(&commandStatusMux);
 
+  if (xQueueSend(robotCommandQueue, &command, 0) != pdTRUE) return false;
+
   commandId = command.id;
   setMoveCommandPending(command.id);
-  if (xQueueSend(robotCommandQueue, &command, 0) != pdTRUE) return false;
   return true;
 }
 
@@ -216,6 +240,15 @@ bool robotGetMoveCommandStatus(uint32_t commandId, bool &known, bool &accepted) 
   accepted = known && lastMoveCommandAccepted;
   portEXIT_CRITICAL(&commandStatusMux);
   return matches;
+}
+
+bool robotRequestCommandText(const char *commandText) {
+  if (!robotCommandQueue || !commandText || commandText[0] == '\0') return false;
+
+  RobotCommand command;
+  command.type = RobotCommandType::TEXT;
+  snprintf(command.text, sizeof(command.text), "%s", commandText);
+  return xQueueSend(robotCommandQueue, &command, 0) == pdTRUE;
 }
 
 void robotRequestStop() {

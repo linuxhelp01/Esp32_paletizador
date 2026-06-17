@@ -209,6 +209,7 @@ Subscriber esperado:
 
 ```bash
 /palletizer/emergency_stop
+/palletizer/command
 ```
 
 Action esperada:
@@ -285,7 +286,61 @@ Enviar parada:
 ros2 topic pub --once /palletizer/emergency_stop std_msgs/msg/Bool "{data: true}"
 ```
 
-## 7. Enviar setpoint por action
+## 7. Comandos de driver y homing
+
+Los comandos auxiliares se envian como texto por:
+
+```bash
+/palletizer/command [std_msgs/msg/String]
+```
+
+Habilitar motores:
+
+```bash
+ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'ENABLE ALL'}"
+```
+
+Deshabilitar un eje:
+
+```bash
+ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'DISABLE Z'}"
+```
+
+Homing de origen con doble pasada, usando `0x91 0x00`. El ejemplo configura
+limites de software para el eje X entre `-5 mm` y `300 mm`:
+
+```bash
+ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'HOME X -5 300'}"
+```
+
+Tambien se puede indicar velocidad rapida y lenta en RPM:
+
+```bash
+ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'HOME Z 0 250 300 80'}"
+```
+
+Volver al origen de coordenadas ya conocido con `0x91 0x01`:
+
+```bash
+ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'ORIGIN X'}"
+```
+
+Setear cero actual con `0x92` y limites de software:
+
+```bash
+ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'ZERO Y -10 250'}"
+```
+
+Durante homing revisa:
+
+```bash
+ros2 topic echo /palletizer/status
+```
+
+El estado publica `homing`, `home91`, `home3B`, `enabled`, `stalled`,
+`enc31`, `raw35`, `angleError` y los limites por eje.
+
+## 8. Enviar setpoint por action
 
 El action disponible es:
 
@@ -342,7 +397,7 @@ final_y_mm
 final_z_mm
 ```
 
-## 8. Problemas comunes
+## 9. Problemas comunes
 
 ### `The passed action type is invalid`
 
@@ -391,7 +446,7 @@ para ejes prismaticos esta en metros. Para comparar en milimetros usa:
 ros2 topic echo /palletizer/axis_position_mm
 ```
 
-## 9. Compilar y cargar firmware
+## 10. Compilar y cargar firmware
 
 Compilar:
 
@@ -408,4 +463,3 @@ Cargar al ESP32-S3:
 
 Si el puerto esta ocupado por el agente, deten el agente con `Ctrl+C` y vuelve
 a intentar la carga.
-

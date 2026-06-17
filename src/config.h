@@ -28,10 +28,17 @@ static constexpr uint16_t MAX_RPM = 3000;
 static constexpr uint8_t MAX_ACC = 255;
 static constexpr uint8_t DEFAULT_ACC = 10;
 static constexpr uint16_t DEFAULT_RPM = 500;
-// Muestreo: se consulta cada encoder cada 10 ms, equivalente a 100 Hz por motor.
-// La velocidad RPM se consulta menos seguido para dejar prioridad a movimiento.
-static constexpr uint32_t ENCODER_POLL_MS = 10;
-static constexpr uint32_t SPEED_POLL_MS = 100;
+// Muestreo round-robin: se consulta un encoder cada 1 ms.
+// Con 4 motores, cada motor queda actualizado aproximadamente cada 4 ms.
+// La velocidad RPM se consulta menos seguido y en round-robin para dejar
+// prioridad a movimiento. La velocidad usada por ROS se calcula desde 0x31.
+static constexpr uint32_t ENCODER_POLL_MS = 1;
+static constexpr uint32_t SPEED_POLL_MS = 25;
+static constexpr uint32_t RAW_ENCODER_DIAGNOSTIC_POLL_MS = 1000;
+static constexpr uint32_t ANGLE_ERROR_POLL_MS = 10;
+static constexpr uint32_t HOME_STATUS_POLL_MS = 20;
+static constexpr uint32_t ENABLE_STATUS_POLL_MS = 200;
+static constexpr uint32_t STALL_STATUS_POLL_MS = 250;
 static constexpr uint32_t MOTION_COMMAND_POLL_PAUSE_MS = 25;
 static constexpr uint8_t CAN_COMMAND_TX_RETRIES = 3;
 static constexpr uint32_t MOTOR_ONLINE_TIMEOUT_MS = 1500;
@@ -52,6 +59,20 @@ static constexpr int MICRO_ROS_PING_TIMEOUT_MS = 20;
 static constexpr uint8_t MICRO_ROS_PING_ATTEMPTS = 1;
 static constexpr float ACTION_RESULT_MIN_TOLERANCE_MM = 2.0f;
 static constexpr uint32_t ACTION_RESULT_POSITION_STABLE_MS = 250;
+
+// Homing MKS 0x91/0x90. Los valores de trigger/direccion/limite dependen del
+// cableado fisico de los finales de carrera. Los defaults replican el ejemplo
+// del manual Makerbase para origin-switch homing.
+static constexpr uint16_t HOME_FAST_RPM = 300;
+static constexpr uint16_t HOME_SLOW_RPM = 80;
+static constexpr uint8_t HOME_TRIGGER_LEVEL = 0;
+static constexpr uint8_t HOME_LIMIT_ENABLE = 0;
+static constexpr uint8_t HOME_MODE_ORIGIN_SWITCH = 0;
+static constexpr uint32_t HOME_PHASE_TIMEOUT_MS = 60000;
+static constexpr uint8_t HOME_DIRECTION_X1 = 0;
+static constexpr uint8_t HOME_DIRECTION_X2 = 0;
+static constexpr uint8_t HOME_DIRECTION_Y = 0;
+static constexpr uint8_t HOME_DIRECTION_Z = 0;
 
 // Husillo: una vuelta completa del motor desplaza linealmente 8 mm.
 // El encoder MKS reporta 16384 cuentas por vuelta.

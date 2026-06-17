@@ -7,12 +7,20 @@ namespace mks {
 
 static constexpr uint8_t CMD_READ_ENCODER = 0x31;
 static constexpr uint8_t CMD_READ_SPEED_RPM = 0x32;
+static constexpr uint8_t CMD_READ_RAW_ENCODER = 0x35;
+static constexpr uint8_t CMD_READ_ANGLE_ERROR = 0x39;
+static constexpr uint8_t CMD_READ_ENABLE = 0x3A;
+static constexpr uint8_t CMD_READ_HOME_STATUS = 0x3B;
+static constexpr uint8_t CMD_RELEASE_STALL = 0x3D;
+static constexpr uint8_t CMD_READ_STALL = 0x3E;
 static constexpr uint8_t CMD_SET_MODE = 0x82;
+static constexpr uint8_t CMD_SET_HOME_PARAMS = 0x90;
 static constexpr uint8_t CMD_SET_ZERO = 0x92;
 static constexpr uint8_t CMD_RUN_SPEED = 0xF6;
 static constexpr uint8_t CMD_RUN_ABS_COORD = 0xF5;
 static constexpr uint8_t CMD_EMERGENCY_STOP = 0xF7;
 static constexpr uint8_t CMD_HOME = 0x91;
+static constexpr uint8_t CMD_SET_ENABLE = 0xF3;
 static constexpr uint8_t CMD_SYNC_ENABLE = 0x4A;
 static constexpr uint8_t CMD_SYNC_TRIGGER = 0x4B;
 

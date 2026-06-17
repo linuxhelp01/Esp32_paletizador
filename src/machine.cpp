@@ -26,13 +26,61 @@ MotorNode motors[4] = {
 
 static uint32_t lastEncoderPollMs = 0;
 static uint32_t lastSpeedPollMs = 0;
+static uint32_t lastRawEncoderPollMs = 0;
+static uint32_t lastAngleErrorPollMs = 0;
+static uint32_t lastHomeStatusPollMs = 0;
+static uint32_t lastEnableStatusPollMs = 0;
+static uint32_t lastStallStatusPollMs = 0;
 static uint32_t encoderPollingPausedUntilMs = 0;
+static uint8_t nextEncoderPollMotor = 0;
+static uint8_t nextSpeedPollMotor = 0;
+static uint8_t nextRawEncoderPollMotor = 0;
+static uint8_t nextAngleErrorPollMotor = 0;
+static uint8_t nextEnablePollMotor = 0;
+static uint8_t nextStallPollMotor = 0;
 static bool safetyFaultActive = false;
 static const char *safetyFaultReason = "OK";
 static bool xPairMotionMonitoringActive = false;
 static int8_t xPairExpectedDirection = 0;
 
 static bool commandStopAll();
+
+struct AxisLimitState {
+  bool configured = false;
+  float minMm = 0.0f;
+  float maxMm = 0.0f;
+};
+
+enum class HomingPhase : uint8_t {
+  IDLE,
+  CONFIG_FAST,
+  START_FAST,
+  WAIT_FAST,
+  CONFIG_SLOW,
+  START_SLOW,
+  WAIT_SLOW,
+  COMPLETE,
+  FAILED,
+};
+
+struct HomingSequenceState {
+  bool active = false;
+  Axis requestedAxis = Axis::UNKNOWN;
+  Axis axes[3] = {Axis::UNKNOWN, Axis::UNKNOWN, Axis::UNKNOWN};
+  uint8_t axisCount = 0;
+  uint8_t axisIndex = 0;
+  HomingPhase phase = HomingPhase::IDLE;
+  uint16_t fastRpm = HOME_FAST_RPM;
+  uint16_t slowRpm = HOME_SLOW_RPM;
+  uint32_t phaseStartedMs = 0;
+  bool configureLimits = false;
+  float limitMinMm = 0.0f;
+  float limitMaxMm = 0.0f;
+  char stateText[48] = "idle";
+};
+
+static AxisLimitState axisLimits[3];
+static HomingSequenceState homing;
 
 static String nextToken(String &line) {
   line.trim();
@@ -48,6 +96,63 @@ static String nextToken(String &line) {
   line = line.substring(idx + 1);
   token.trim();
   return token;
+}
+
+static int8_t axisLimitIndex(Axis axis) {
+  switch (axis) {
+    case Axis::X:
+      return 0;
+    case Axis::Y:
+      return 1;
+    case Axis::Z:
+      return 2;
+    default:
+      return -1;
+  }
+}
+
+static Axis currentHomingAxis() {
+  if (!homing.active || homing.axisIndex >= homing.axisCount) return Axis::UNKNOWN;
+  return homing.axes[homing.axisIndex];
+}
+
+static const char *axisName(Axis axis) {
+  switch (axis) {
+    case Axis::X:
+      return "X";
+    case Axis::X1:
+      return "X1";
+    case Axis::X2:
+      return "X2";
+    case Axis::Y:
+      return "Y";
+    case Axis::Z:
+      return "Z";
+    case Axis::ALL:
+      return "ALL";
+    default:
+      return "?";
+  }
+}
+
+static uint8_t motorIndex(const MotorNode &motor) {
+  for (uint8_t i = 0; i < 4; i++) {
+    if (&motors[i] == &motor) return i;
+  }
+  return 0;
+}
+
+static uint8_t homeDirectionForMotor(const MotorNode &motor) {
+  switch (motorIndex(motor)) {
+    case 0:
+      return HOME_DIRECTION_X1;
+    case 1:
+      return HOME_DIRECTION_X2;
+    case 2:
+      return HOME_DIRECTION_Y;
+    default:
+      return HOME_DIRECTION_Z;
+  }
 }
 
 static MotorNode *findMotorById(uint16_t canId) {
@@ -148,6 +253,55 @@ static bool safetyAllowsMotion() {
   return false;
 }
 
+static bool setAxisLimits(Axis axis, float minMm, float maxMm) {
+  const int8_t index = axisLimitIndex(axis);
+  if (index < 0 || !(minMm < maxMm)) return false;
+
+  axisLimits[index].configured = true;
+  axisLimits[index].minMm = minMm;
+  axisLimits[index].maxMm = maxMm;
+  return true;
+}
+
+bool getAxisLimits(Axis axis, float &minMm, float &maxMm) {
+  const int8_t index = axisLimitIndex(axis);
+  if (index < 0) return false;
+
+  minMm = axisLimits[index].minMm;
+  maxMm = axisLimits[index].maxMm;
+  return axisLimits[index].configured;
+}
+
+bool axisLimitsAreConfigured(Axis axis) {
+  const int8_t index = axisLimitIndex(axis);
+  return index >= 0 && axisLimits[index].configured;
+}
+
+static bool targetWithinSoftwareLimits(Axis axis, float targetMm) {
+  const int8_t index = axisLimitIndex(axis);
+  if (index < 0) return false;
+  if (!axisLimits[index].configured) return true;
+  return targetMm >= axisLimits[index].minMm && targetMm <= axisLimits[index].maxMm;
+}
+
+static bool xyzWithinSoftwareLimits(float xMm, float yMm, float zMm) {
+  return targetWithinSoftwareLimits(Axis::X, xMm) &&
+         targetWithinSoftwareLimits(Axis::Y, yMm) &&
+         targetWithinSoftwareLimits(Axis::Z, zMm);
+}
+
+static bool motorIsCommandable(const MotorNode &motor) {
+  if (!motor.enabledOk || !motor.enabled) return false;
+  if (motor.stallOk && motor.stalled) return false;
+  return true;
+}
+
+static bool axisIsEnabledAndClear(Axis axis) {
+  return forEachMotorInAxis(axis, [](MotorNode &motor) {
+    return motorIsCommandable(motor);
+  });
+}
+
 static bool axisIsSafeForMotion(Axis axis) {
   if (!safetyAllowsMotion()) return false;
   if (axis == Axis::X1 || axis == Axis::X2) {
@@ -155,7 +309,7 @@ static bool axisIsSafeForMotion(Axis axis) {
     return false;
   }
   if (axis == Axis::X) return isXPairAligned();
-  return axis != Axis::UNKNOWN;
+  return axis == Axis::Y || axis == Axis::Z || axis == Axis::ALL;
 }
 
 static void setXPairExpectedDirectionFromSpeed(int32_t rpm) {
@@ -234,6 +388,7 @@ Axis parseAxis(String token) {
   if (token == "X2") return Axis::X2;
   if (token == "Y") return Axis::Y;
   if (token == "Z") return Axis::Z;
+  if (token == "ALL" || token == "TODOS") return Axis::ALL;
   return Axis::UNKNOWN;
 }
 
@@ -289,6 +444,8 @@ static void encodeSpeed(int32_t signedRpm, uint8_t &speedHigh, uint8_t &speedLow
 }
 
 static bool commandSpeed(MotorNode &motor, int32_t rpm, uint8_t acc) {
+  if (!motorIsCommandable(motor)) return false;
+
   uint8_t speedHigh = 0;
   uint8_t speedLow = 0;
   encodeSpeed(toMotorSpeed(motor, rpm), speedHigh, speedLow);
@@ -364,14 +521,202 @@ bool isAtXYZMm(float xMm, float yMm, float zMm, float toleranceMm) {
          fabsf(currentZ - zMm) <= toleranceMm;
 }
 
+static bool commandConfigureHome(MotorNode &motor, uint16_t rpm) {
+  rpm = clampRpm(rpm);
+  const uint8_t cmd[] = {
+    mks::CMD_SET_HOME_PARAMS,
+    HOME_TRIGGER_LEVEL,
+    homeDirectionForMotor(motor),
+    static_cast<uint8_t>((rpm >> 8) & 0xFF),
+    static_cast<uint8_t>(rpm & 0xFF),
+    HOME_LIMIT_ENABLE,
+    HOME_MODE_ORIGIN_SWITCH,
+  };
+  return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
+}
+
 static bool commandHome(MotorNode &motor) {
+  motor.homeStatus = 0;
+  motor.homeCommandOk = false;
+  motor.homeStatusSingleTurn = 0;
+  motor.homeStatusOrigin = 0;
+  motor.homeStatusOk = false;
   const uint8_t cmd[] = {mks::CMD_HOME, 0x00};
   return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
 }
 
+static bool commandGoOrigin(MotorNode &motor) {
+  if (!motorIsCommandable(motor)) return false;
+  motor.homeStatus = 0;
+  motor.homeCommandOk = false;
+  motor.homeStatusSingleTurn = 0;
+  motor.homeStatusOrigin = 0;
+  motor.homeStatusOk = false;
+  const uint8_t cmd[] = {mks::CMD_HOME, 0x01};
+  return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
+}
+
 static bool commandSetZero(MotorNode &motor) {
+  if (!motorIsCommandable(motor)) return false;
   const uint8_t cmd[] = {mks::CMD_SET_ZERO};
   return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
+}
+
+static bool commandSetEnable(MotorNode &motor, bool enable) {
+  const uint8_t cmd[] = {mks::CMD_SET_ENABLE, static_cast<uint8_t>(enable ? 0x01 : 0x00)};
+  const bool ok = sendDriverCommand(motor.canId, cmd, sizeof(cmd));
+  if (ok) {
+    motor.enableCommandStatus = 0;
+    motor.enabledOk = false;
+  }
+  return ok;
+}
+
+static void setHomingText(const char *phase, Axis axis) {
+  snprintf(homing.stateText, sizeof(homing.stateText), "%s:%s", phase, axisName(axis));
+}
+
+static bool configureHomingAxes(Axis axis) {
+  homing.axisCount = 0;
+  homing.axisIndex = 0;
+  if (axis == Axis::ALL) {
+    homing.axes[0] = Axis::X;
+    homing.axes[1] = Axis::Y;
+    homing.axes[2] = Axis::Z;
+    homing.axisCount = 3;
+    return true;
+  }
+  if (axis == Axis::X || axis == Axis::Y || axis == Axis::Z) {
+    homing.axes[0] = axis;
+    homing.axisCount = 1;
+    return true;
+  }
+  return false;
+}
+
+static bool homingAxisHasFailure(Axis axis) {
+  bool failed = false;
+  forEachMotorInAxis(axis, [&failed](MotorNode &motor) {
+    if (motor.homeStatus == 0 && motor.homeCommandOk) failed = true;
+    if (motor.homeStatusOrigin == 2 && motor.homeStatusOk) failed = true;
+    return true;
+  });
+  return failed;
+}
+
+static bool homingAxisIsComplete(Axis axis) {
+  bool complete = true;
+  forEachMotorInAxis(axis, [&complete](MotorNode &motor) {
+    const bool commandComplete = motor.homeCommandOk && motor.homeStatus == 2;
+    const bool originComplete = motor.homeStatusOk && motor.homeStatusOrigin == 1;
+    complete &= commandComplete || originComplete;
+    return true;
+  });
+  return complete;
+}
+
+static void failHoming(const char *reason) {
+  homing.active = false;
+  homing.phase = HomingPhase::FAILED;
+  snprintf(homing.stateText, sizeof(homing.stateText), "failed:%s", reason);
+  xPairMotionMonitoringActive = false;
+  xPairExpectedDirection = 0;
+  commandStopAll();
+}
+
+static void finishCurrentHomingAxis() {
+  const Axis axis = currentHomingAxis();
+  forEachMotorInAxis(axis, [](MotorNode &motor) {
+    const uint8_t readEncoder[] = {mks::CMD_READ_ENCODER};
+    const uint8_t readRaw[] = {mks::CMD_READ_RAW_ENCODER};
+    mks::sendFrame(motor.canId, readEncoder, sizeof(readEncoder));
+    mks::sendFrame(motor.canId, readRaw, sizeof(readRaw));
+    return true;
+  });
+
+  if (homing.configureLimits && homing.axisCount == 1) {
+    setAxisLimits(axis, homing.limitMinMm, homing.limitMaxMm);
+  }
+
+  homing.axisIndex++;
+  if (homing.axisIndex >= homing.axisCount) {
+    homing.active = false;
+    homing.phase = HomingPhase::COMPLETE;
+    snprintf(homing.stateText, sizeof(homing.stateText), "complete:%s", axisName(homing.requestedAxis));
+    clearXPairExpectedDirectionIfAxis(axis);
+    return;
+  }
+
+  homing.phase = HomingPhase::CONFIG_FAST;
+  homing.phaseStartedMs = millis();
+  setHomingText("config_fast", currentHomingAxis());
+}
+
+bool startHomeAxis(Axis axis, bool configureLimits, float minMm, float maxMm, uint16_t fastRpm, uint16_t slowRpm) {
+  if (homing.active) return false;
+  if (!safetyAllowsMotion()) return false;
+  if (!configureHomingAxes(axis)) return false;
+  if (configureLimits && homing.axisCount != 1) return false;
+  if (configureLimits && !(minMm < maxMm)) return false;
+
+  for (uint8_t i = 0; i < homing.axisCount; i++) {
+    if (!axisIsEnabledAndClear(homing.axes[i])) return false;
+    if (homing.axes[i] == Axis::X && !isXPairAligned()) return false;
+  }
+
+  homing.active = true;
+  homing.requestedAxis = axis;
+  homing.phase = HomingPhase::CONFIG_FAST;
+  homing.fastRpm = fastRpm > 0 ? clampRpm(fastRpm) : HOME_FAST_RPM;
+  homing.slowRpm = slowRpm > 0 ? clampRpm(slowRpm) : HOME_SLOW_RPM;
+  homing.configureLimits = configureLimits;
+  homing.limitMinMm = minMm;
+  homing.limitMaxMm = maxMm;
+  homing.phaseStartedMs = millis();
+  setHomingText("config_fast", currentHomingAxis());
+  if (axis == Axis::X) {
+    xPairMotionMonitoringActive = true;
+    xPairExpectedDirection = 0;
+  }
+  return true;
+}
+
+bool commandGoOriginAxis(Axis axis) {
+  if (!safetyAllowsMotion() || homing.active) return false;
+  if (axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) return false;
+  if (!axisIsEnabledAndClear(axis)) return false;
+  if (axis == Axis::X && !isXPairAligned()) return false;
+  if (axis == Axis::ALL && !isXPairAligned()) return false;
+  return forEachMotorInAxis(axis, [](MotorNode &motor) {
+    return commandGoOrigin(motor);
+  });
+}
+
+bool commandSetZeroAxis(Axis axis, bool configureLimits, float minMm, float maxMm) {
+  if (!safetyAllowsMotion() || homing.active) return false;
+  if (axis == Axis::X1 || axis == Axis::X2 || axis == Axis::ALL || axis == Axis::UNKNOWN) return false;
+  if (configureLimits && !setAxisLimits(axis, minMm, maxMm)) return false;
+  if (!axisIsEnabledAndClear(axis)) return false;
+  if (axis == Axis::X && !isXPairAligned()) return false;
+  return forEachMotorInAxis(axis, [](MotorNode &motor) {
+    return commandSetZero(motor);
+  });
+}
+
+bool commandSetAxisEnable(Axis axis, bool enable) {
+  if (axis == Axis::UNKNOWN) return false;
+  if (enable && safetyFaultActive) return false;
+  if (!enable) {
+    if (homing.active) {
+      homing.active = false;
+      homing.phase = HomingPhase::FAILED;
+      snprintf(homing.stateText, sizeof(homing.stateText), "aborted:disable");
+    }
+    clearXPairExpectedDirectionIfAxis(axis);
+  }
+  return forEachMotorInAxis(axis, [enable](MotorNode &motor) {
+    return commandSetEnable(motor, enable);
+  });
 }
 
 static bool commandSetBusFocMode(MotorNode &motor) {
@@ -410,6 +755,8 @@ static bool commandPrepareSynchronizedMove() {
 }
 
 static bool commandAbsolutePosition(MotorNode &motor, int32_t encoderTarget, uint16_t rpm, uint8_t acc) {
+  if (!motorIsCommandable(motor)) return false;
+
   encoderTarget = toMotorTarget(motor, encoderTarget);
   if (encoderTarget < MIN_INT24) encoderTarget = MIN_INT24;
   if (encoderTarget > MAX_INT24) encoderTarget = MAX_INT24;
@@ -438,6 +785,9 @@ bool commandMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float acc
   const uint8_t acc = accelMmS2 > 0.0f ? linearAccelMmS2ToMksAcc(accelMmS2) : DEFAULT_ACC;
 
   if (!safetyAllowsMotion() || !isXPairAligned()) return false;
+  if (homing.active) return false;
+  if (!axisIsEnabledAndClear(Axis::ALL)) return false;
+  if (!xyzWithinSoftwareLimits(xMm, yMm, zMm)) return false;
 
   setXPairExpectedDirectionFromTarget(xTarget);
   bool ok = commandPrepareSynchronizedMove();
@@ -463,6 +813,31 @@ static bool requestSpeed(const MotorNode &motor) {
   return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
 }
 
+static bool requestRawEncoder(const MotorNode &motor) {
+  const uint8_t cmd[] = {mks::CMD_READ_RAW_ENCODER};
+  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+}
+
+static bool requestAngleError(const MotorNode &motor) {
+  const uint8_t cmd[] = {mks::CMD_READ_ANGLE_ERROR};
+  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+}
+
+static bool requestEnableStatus(const MotorNode &motor) {
+  const uint8_t cmd[] = {mks::CMD_READ_ENABLE};
+  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+}
+
+static bool requestHomeStatus(const MotorNode &motor) {
+  const uint8_t cmd[] = {mks::CMD_READ_HOME_STATUS};
+  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+}
+
+static bool requestStallStatus(const MotorNode &motor) {
+  const uint8_t cmd[] = {mks::CMD_READ_STALL};
+  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+}
+
 static void handleEncoderReply(MotorNode &motor, const twai_message_t &msg) {
   if (msg.data_length_code < 8) return;
 
@@ -474,11 +849,21 @@ static void handleEncoderReply(MotorNode &motor, const twai_message_t &msg) {
     value |= 0xFFFF000000000000LL;
   }
 
+  const uint32_t now = millis();
+  if (motor.encoderOk && motor.lastEncoderUpdateMs != now) {
+    const uint32_t dtMs = now - motor.lastEncoderUpdateMs;
+    if (dtMs > 0) {
+      const int64_t delta = (value * motor.direction) - motor.encoder;
+      const float instantVelocityMmS = encoderCountsToMm(delta) * 1000.0f / static_cast<float>(dtMs);
+      motor.velocityMmS = 0.7f * motor.velocityMmS + 0.3f * instantVelocityMmS;
+    }
+  }
+
   motor.rawEncoder = value;
   motor.previousEncoder = motor.encoder;
   motor.encoder = value * motor.direction;
   motor.encoderOk = true;
-  motor.lastEncoderUpdateMs = millis();
+  motor.lastEncoderUpdateMs = now;
   motor.lastSeenMs = motor.lastEncoderUpdateMs;
   verifyXPairDirectionSafety();
 }
@@ -492,6 +877,61 @@ static void handleSpeedReply(MotorNode &motor, const twai_message_t &msg) {
   motor.lastSeenMs = millis();
 }
 
+static void handleRawEncoderReply(MotorNode &motor, const twai_message_t &msg) {
+  if (msg.data_length_code < 8) return;
+
+  int64_t value = 0;
+  for (uint8_t i = 1; i <= 6; i++) {
+    value = (value << 8) | msg.data[i];
+  }
+  if (value & 0x0000800000000000LL) {
+    value |= 0xFFFF000000000000LL;
+  }
+
+  motor.diagnosticRawEncoder = value * motor.direction;
+  motor.rawEncoderOk = true;
+  motor.lastRawEncoderUpdateMs = millis();
+  motor.lastSeenMs = motor.lastRawEncoderUpdateMs;
+}
+
+static void handleAngleErrorReply(MotorNode &motor, const twai_message_t &msg) {
+  if (msg.data_length_code >= 6) {
+    motor.angleError =
+        (static_cast<int32_t>(msg.data[1]) << 24) |
+        (static_cast<int32_t>(msg.data[2]) << 16) |
+        (static_cast<int32_t>(msg.data[3]) << 8) |
+        static_cast<int32_t>(msg.data[4]);
+  } else if (msg.data_length_code >= 4) {
+    motor.angleError = static_cast<int16_t>((static_cast<uint16_t>(msg.data[1]) << 8) | msg.data[2]);
+  } else {
+    return;
+  }
+  motor.angleErrorOk = true;
+  motor.lastSeenMs = millis();
+}
+
+static void handleEnableReply(MotorNode &motor, const twai_message_t &msg) {
+  if (msg.data_length_code < 3) return;
+  motor.enabled = msg.data[1] != 0;
+  motor.enabledOk = true;
+  motor.lastSeenMs = millis();
+}
+
+static void handleHomeStatusReply(MotorNode &motor, const twai_message_t &msg) {
+  if (msg.data_length_code < 4) return;
+  motor.homeStatusSingleTurn = msg.data[1];
+  motor.homeStatusOrigin = msg.data[2];
+  motor.homeStatusOk = true;
+  motor.lastSeenMs = millis();
+}
+
+static void handleStallReply(MotorNode &motor, const twai_message_t &msg) {
+  if (msg.data_length_code < 3) return;
+  motor.stalled = msg.data[1] != 0;
+  motor.stallOk = true;
+  motor.lastSeenMs = millis();
+}
+
 static void handleStatusReply(MotorNode &motor, const twai_message_t &msg) {
   if (msg.data_length_code < 3) return;
   const uint8_t code = msg.data[0];
@@ -499,6 +939,12 @@ static void handleStatusReply(MotorNode &motor, const twai_message_t &msg) {
 
   if (code == mks::CMD_HOME) {
     motor.homeStatus = status;
+    motor.homeCommandOk = true;
+  } else if (code == mks::CMD_SET_ENABLE) {
+    motor.enableCommandStatus = status;
+    if (status == 1) {
+      motor.enabledOk = false;
+    }
   } else if (code == mks::CMD_RUN_ABS_COORD || code == mks::CMD_RUN_SPEED || code == mks::CMD_EMERGENCY_STOP) {
     motor.moveStatus = status;
   }
@@ -519,12 +965,30 @@ void drainCanReplies() {
       case mks::CMD_READ_SPEED_RPM:
         handleSpeedReply(*motor, rx);
         break;
+      case mks::CMD_READ_RAW_ENCODER:
+        handleRawEncoderReply(*motor, rx);
+        break;
+      case mks::CMD_READ_ANGLE_ERROR:
+        handleAngleErrorReply(*motor, rx);
+        break;
+      case mks::CMD_READ_ENABLE:
+        handleEnableReply(*motor, rx);
+        break;
+      case mks::CMD_READ_HOME_STATUS:
+        handleHomeStatusReply(*motor, rx);
+        break;
+      case mks::CMD_READ_STALL:
+        handleStallReply(*motor, rx);
+        break;
       case mks::CMD_RUN_ABS_COORD:
       case mks::CMD_RUN_SPEED:
       case mks::CMD_EMERGENCY_STOP:
       case mks::CMD_HOME:
       case mks::CMD_SET_ZERO:
       case mks::CMD_SET_MODE:
+      case mks::CMD_SET_ENABLE:
+      case mks::CMD_SET_HOME_PARAMS:
+      case mks::CMD_RELEASE_STALL:
         handleStatusReply(*motor, rx);
         break;
       default:
@@ -540,17 +1004,154 @@ void pollEncoders() {
 
   if (now - lastEncoderPollMs >= ENCODER_POLL_MS) {
     lastEncoderPollMs = now;
-    for (const MotorNode &motor : motors) {
-      requestEncoder(motor);
-    }
+    requestEncoder(motors[nextEncoderPollMotor]);
+    nextEncoderPollMotor = (nextEncoderPollMotor + 1) % 4;
   }
 
   if (now - lastSpeedPollMs >= SPEED_POLL_MS) {
     lastSpeedPollMs = now;
-    for (const MotorNode &motor : motors) {
-      requestSpeed(motor);
-    }
+    requestSpeed(motors[nextSpeedPollMotor]);
+    nextSpeedPollMotor = (nextSpeedPollMotor + 1) % 4;
   }
+
+  if (homing.active && now - lastHomeStatusPollMs >= HOME_STATUS_POLL_MS) {
+    lastHomeStatusPollMs = now;
+    const Axis axis = currentHomingAxis();
+    forEachMotorInAxis(axis, [](MotorNode &motor) {
+      requestHomeStatus(motor);
+      return true;
+    });
+  }
+
+  if (!homing.active && now - lastRawEncoderPollMs >= RAW_ENCODER_DIAGNOSTIC_POLL_MS) {
+    lastRawEncoderPollMs = now;
+    requestRawEncoder(motors[nextRawEncoderPollMotor]);
+    nextRawEncoderPollMotor = (nextRawEncoderPollMotor + 1) % 4;
+  }
+
+  if (now - lastAngleErrorPollMs >= ANGLE_ERROR_POLL_MS) {
+    lastAngleErrorPollMs = now;
+    requestAngleError(motors[nextAngleErrorPollMotor]);
+    nextAngleErrorPollMotor = (nextAngleErrorPollMotor + 1) % 4;
+  }
+
+  if (now - lastEnableStatusPollMs >= ENABLE_STATUS_POLL_MS) {
+    lastEnableStatusPollMs = now;
+    requestEnableStatus(motors[nextEnablePollMotor]);
+    nextEnablePollMotor = (nextEnablePollMotor + 1) % 4;
+  }
+
+  if (now - lastStallStatusPollMs >= STALL_STATUS_POLL_MS) {
+    lastStallStatusPollMs = now;
+    requestStallStatus(motors[nextStallPollMotor]);
+    nextStallPollMotor = (nextStallPollMotor + 1) % 4;
+  }
+}
+
+void serviceMachine() {
+  if (!homing.active) return;
+
+  const uint32_t now = millis();
+  const Axis axis = currentHomingAxis();
+  if (axis == Axis::UNKNOWN) {
+    failHoming("axis");
+    return;
+  }
+
+  if (homing.phase != HomingPhase::CONFIG_FAST &&
+      homing.phase != HomingPhase::START_FAST &&
+      homing.phase != HomingPhase::CONFIG_SLOW &&
+      homing.phase != HomingPhase::START_SLOW &&
+      now - homing.phaseStartedMs > HOME_PHASE_TIMEOUT_MS) {
+    failHoming("timeout");
+    return;
+  }
+
+  if (homingAxisHasFailure(axis)) {
+    failHoming("driver");
+    return;
+  }
+
+  switch (homing.phase) {
+    case HomingPhase::CONFIG_FAST:
+      {
+        const uint16_t rpm = homing.fastRpm;
+        if (!forEachMotorInAxis(axis, [rpm](MotorNode &motor) {
+              return commandConfigureHome(motor, rpm);
+            })) {
+          failHoming("cfg_fast");
+          return;
+        }
+      }
+      homing.phase = HomingPhase::START_FAST;
+      homing.phaseStartedMs = now;
+      setHomingText("start_fast", axis);
+      break;
+
+    case HomingPhase::START_FAST:
+      if (!forEachMotorInAxis(axis, [](MotorNode &motor) {
+            return commandHome(motor);
+          })) {
+        failHoming("home_fast");
+        return;
+      }
+      homing.phase = HomingPhase::WAIT_FAST;
+      homing.phaseStartedMs = now;
+      setHomingText("wait_fast", axis);
+      break;
+
+    case HomingPhase::WAIT_FAST:
+      if (homingAxisIsComplete(axis)) {
+        homing.phase = HomingPhase::CONFIG_SLOW;
+        homing.phaseStartedMs = now;
+        setHomingText("config_slow", axis);
+      }
+      break;
+
+    case HomingPhase::CONFIG_SLOW:
+      {
+        const uint16_t rpm = homing.slowRpm;
+        if (!forEachMotorInAxis(axis, [rpm](MotorNode &motor) {
+              return commandConfigureHome(motor, rpm);
+            })) {
+          failHoming("cfg_slow");
+          return;
+        }
+      }
+      homing.phase = HomingPhase::START_SLOW;
+      homing.phaseStartedMs = now;
+      setHomingText("start_slow", axis);
+      break;
+
+    case HomingPhase::START_SLOW:
+      if (!forEachMotorInAxis(axis, [](MotorNode &motor) {
+            return commandHome(motor);
+          })) {
+        failHoming("home_slow");
+        return;
+      }
+      homing.phase = HomingPhase::WAIT_SLOW;
+      homing.phaseStartedMs = now;
+      setHomingText("wait_slow", axis);
+      break;
+
+    case HomingPhase::WAIT_SLOW:
+      if (homingAxisIsComplete(axis)) {
+        finishCurrentHomingAxis();
+      }
+      break;
+
+    default:
+      break;
+  }
+}
+
+bool homingIsActive() {
+  return homing.active;
+}
+
+const char *homingStateText() {
+  return homing.stateText;
 }
 
 void printHelp() {
@@ -571,9 +1172,14 @@ void printHelp() {
   DebugSerial.println("  TRIGGER            (disparo sincronizado MKS 4Bh por broadcast)");
   DebugSerial.println("  VEL <X|Y|Z> <rpm> [acc]");
   DebugSerial.println("  VELANG <X|Y|Z> <rpm> [rpm_s]");
-  DebugSerial.println("  HOME X            (homing simultaneo X1/X2)");
-  DebugSerial.println("  HOME <X|Y|Z>");
-  DebugSerial.println("  ZERO <X|Y|Z>");
+  DebugSerial.println("  HOME <X|Y|Z|ALL> [min_mm max_mm] [fast_rpm slow_rpm]");
+  DebugSerial.println("      0x91 0x00 doble pasada: rapida y luego lenta.");
+  DebugSerial.println("  ORIGIN <X|Y|Z|ALL>");
+  DebugSerial.println("      0x91 0x01: vuelve al origen de coordenadas ya definido.");
+  DebugSerial.println("  ZERO <X|Y|Z> <min_mm> <max_mm>");
+  DebugSerial.println("      0x92: define cero actual y limites de software del eje.");
+  DebugSerial.println("  ENABLE <X|Y|Z|ALL>");
+  DebugSerial.println("  DISABLE <X|Y|Z|ALL>");
   DebugSerial.println("  PING              (fuerza consulta CAN a todos los motores)");
   DebugSerial.println("  STOP");
   DebugSerial.println("  FAULT STATUS      (muestra el estado de seguridad)");
@@ -589,6 +1195,19 @@ void printStatus() {
   DebugSerial.print(safetyFaultActive ? 1 : 0);
   DebugSerial.print(" reason=");
   DebugSerial.println(safetyFaultReason);
+  DebugSerial.print("  homing=");
+  DebugSerial.println(homing.stateText);
+  for (Axis axis : {Axis::X, Axis::Y, Axis::Z}) {
+    const int8_t index = axisLimitIndex(axis);
+    DebugSerial.print("  limit ");
+    DebugSerial.print(axisName(axis));
+    DebugSerial.print(" configured=");
+    DebugSerial.print(axisLimits[index].configured ? 1 : 0);
+    DebugSerial.print(" min=");
+    DebugSerial.print(axisLimits[index].minMm, 3);
+    DebugSerial.print(" max=");
+    DebugSerial.println(axisLimits[index].maxMm, 3);
+  }
   const uint32_t now = millis();
   for (const MotorNode &motor : motors) {
     const bool online = motorIsOnline(motor, now);
@@ -598,6 +1217,12 @@ void printStatus() {
     DebugSerial.print(motor.canId, HEX);
     DebugSerial.print(" online=");
     DebugSerial.print(online ? 1 : 0);
+    DebugSerial.print(" enabled=");
+    if (motor.enabledOk) DebugSerial.print(motor.enabled ? 1 : 0);
+    else DebugSerial.print("?");
+    DebugSerial.print(" stalled=");
+    if (motor.stallOk) DebugSerial.print(motor.stalled ? 1 : 0);
+    else DebugSerial.print("?");
     DebugSerial.print(" angularEnc=");
     if (motor.encoderOk) DebugSerial.print(motor.encoder);
     else DebugSerial.print("?");
@@ -607,16 +1232,34 @@ void printStatus() {
     DebugSerial.print(" rpm=");
     if (motor.rpmOk) DebugSerial.print(motor.rpm);
     else DebugSerial.print("?");
+    DebugSerial.print(" velMmS=");
+    if (motor.encoderOk) DebugSerial.print(motor.velocityMmS, 3);
+    else DebugSerial.print("?");
+    DebugSerial.print(" angleErr=");
+    if (motor.angleErrorOk) DebugSerial.print(motor.angleError);
+    else DebugSerial.print("?");
     DebugSerial.print(" acc=");
     DebugSerial.print(motor.lastAcc);
     DebugSerial.print(" moveStatus=");
     DebugSerial.print(motor.moveStatus);
-    DebugSerial.print(" homeStatus=");
+    DebugSerial.print(" home91=");
     DebugSerial.print(motor.homeStatus);
+    DebugSerial.print(" home3B=[");
+    if (motor.homeStatusOk) {
+      DebugSerial.print(motor.homeStatusSingleTurn);
+      DebugSerial.print(",");
+      DebugSerial.print(motor.homeStatusOrigin);
+    } else {
+      DebugSerial.print("?,?");
+    }
+    DebugSerial.print("]");
     DebugSerial.print(" last=");
     DebugSerial.print(motor.lastSeenMs);
-    DebugSerial.print(" rawEnc=");
-    if (motor.encoderOk) DebugSerial.println(motor.rawEncoder);
+    DebugSerial.print(" raw31=");
+    if (motor.encoderOk) DebugSerial.print(motor.rawEncoder);
+    else DebugSerial.print("?");
+    DebugSerial.print(" raw35=");
+    if (motor.rawEncoderOk) DebugSerial.println(motor.diagnosticRawEncoder);
     else DebugSerial.println("?");
   }
 }
@@ -672,6 +1315,11 @@ void handleMachineCommand(String line) {
     for (const MotorNode &motor : motors) {
       ok &= requestEncoder(motor);
       ok &= requestSpeed(motor);
+      ok &= requestRawEncoder(motor);
+      ok &= requestAngleError(motor);
+      ok &= requestEnableStatus(motor);
+      ok &= requestHomeStatus(motor);
+      ok &= requestStallStatus(motor);
       delay(5);
     }
     reportCommandResult("PING", ok);
@@ -700,7 +1348,7 @@ void handleMachineCommand(String line) {
     Axis axis = parseAxis(nextToken(line));
     int32_t rpm = nextToken(line).toInt();
     uint8_t acc = line.length() ? clampAcc(nextToken(line).toInt()) : DEFAULT_ACC;
-    if (!axisIsSafeForMotion(axis)) {
+    if (!axisIsSafeForMotion(axis) || axisLimitsAreConfigured(axis) || homing.active) {
       reportCommandResult("VEL", false);
       return;
     }
@@ -720,7 +1368,7 @@ void handleMachineCommand(String line) {
     Axis axis = parseAxis(nextToken(line));
     int32_t rpm = nextToken(line).toInt();
     uint8_t acc = line.length() ? angularAccelRpmSToMksAcc(nextToken(line).toFloat()) : DEFAULT_ACC;
-    if (!axisIsSafeForMotion(axis)) {
+    if (!axisIsSafeForMotion(axis) || axisLimitsAreConfigured(axis) || homing.active) {
       reportCommandResult("VELANG", false);
       return;
     }
@@ -780,10 +1428,11 @@ void handleMachineCommand(String line) {
 
   if (command == "POSMM") {
     Axis axis = parseAxis(nextToken(line));
-    int32_t target = mmToEncoderCounts(nextToken(line).toFloat());
+    const float targetMm = nextToken(line).toFloat();
+    int32_t target = mmToEncoderCounts(targetMm);
     uint16_t rpm = line.length() ? clampRpm(nextToken(line).toInt()) : DEFAULT_RPM;
     uint8_t acc = line.length() ? clampAcc(nextToken(line).toInt()) : DEFAULT_ACC;
-    if (!axisIsSafeForMotion(axis)) {
+    if (!axisIsSafeForMotion(axis) || !targetWithinSoftwareLimits(axis, targetMm) || homing.active) {
       reportCommandResult("POSMM", false);
       return;
     }
@@ -801,10 +1450,11 @@ void handleMachineCommand(String line) {
 
   if (command == "POSLINE") {
     Axis axis = parseAxis(nextToken(line));
-    int32_t target = mmToEncoderCounts(nextToken(line).toFloat());
+    const float targetMm = nextToken(line).toFloat();
+    int32_t target = mmToEncoderCounts(targetMm);
     uint16_t rpm = line.length() ? linearSpeedMmSToRpm(nextToken(line).toFloat()) : DEFAULT_RPM;
     uint8_t acc = line.length() ? linearAccelMmS2ToMksAcc(nextToken(line).toFloat()) : DEFAULT_ACC;
-    if (!axisIsSafeForMotion(axis)) {
+    if (!axisIsSafeForMotion(axis) || !targetWithinSoftwareLimits(axis, targetMm) || homing.active) {
       reportCommandResult("POSLINE", false);
       return;
     }
@@ -833,43 +1483,53 @@ void handleMachineCommand(String line) {
 
   if (command == "HOME") {
     Axis axis = parseAxis(nextToken(line));
-    if (!safetyAllowsMotion()) {
-      reportCommandResult("HOME", false);
-      return;
+    bool configureLimits = false;
+    float minMm = 0.0f;
+    float maxMm = 0.0f;
+    uint16_t fastRpm = HOME_FAST_RPM;
+    uint16_t slowRpm = HOME_SLOW_RPM;
+    if (line.length()) {
+      minMm = nextToken(line).toFloat();
+      if (line.length()) {
+        maxMm = nextToken(line).toFloat();
+        configureLimits = true;
+      }
     }
-    if (axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) {
-      DebugSerial.println("X ERROR: usa HOME X para referenciar X1/X2 juntos.");
-      reportCommandResult("HOME", false);
-      return;
-    }
-    if (axis == Axis::X) {
-      xPairMotionMonitoringActive = true;
-      xPairExpectedDirection = 0;
-    }
-    bool ok = forEachMotorInAxis(axis, [](MotorNode &motor) {
-      return commandHome(motor);
-    });
-    if (!ok) clearXPairExpectedDirectionIfAxis(axis);
+    if (line.length()) fastRpm = clampRpm(nextToken(line).toInt());
+    if (line.length()) slowRpm = clampRpm(nextToken(line).toInt());
+
+    const bool ok = startHomeAxis(axis, configureLimits, minMm, maxMm, fastRpm, slowRpm);
     reportCommandResult("HOME", ok);
+    return;
+  }
+
+  if (command == "ORIGIN") {
+    Axis axis = parseAxis(nextToken(line));
+    const bool ok = commandGoOriginAxis(axis);
+    reportCommandResult("ORIGIN", ok);
     return;
   }
 
   if (command == "ZERO") {
     Axis axis = parseAxis(nextToken(line));
-    if (!safetyAllowsMotion()) {
-      reportCommandResult("ZERO", false);
-      return;
-    }
-    if (axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) {
-      DebugSerial.println("X ERROR: usa ZERO X para ajustar cero en X1/X2 juntos.");
-      reportCommandResult("ZERO", false);
-      return;
-    }
-    bool ok = forEachMotorInAxis(axis, [](MotorNode &motor) {
-      return commandSetZero(motor);
-    });
-    clearXPairExpectedDirectionIfAxis(axis);
+    const float minMm = nextToken(line).toFloat();
+    const float maxMm = nextToken(line).toFloat();
+    const bool ok = commandSetZeroAxis(axis, true, minMm, maxMm);
     reportCommandResult("ZERO", ok);
+    return;
+  }
+
+  if (command == "ENABLE") {
+    Axis axis = parseAxis(nextToken(line));
+    const bool ok = commandSetAxisEnable(axis, true);
+    reportCommandResult("ENABLE", ok);
+    return;
+  }
+
+  if (command == "DISABLE") {
+    Axis axis = parseAxis(nextToken(line));
+    const bool ok = commandSetAxisEnable(axis, false);
+    reportCommandResult("DISABLE", ok);
     return;
   }
 
@@ -891,6 +1551,12 @@ bool beginMachine() {
     delay(20);
     commandEmergencyStop(motor);
     delay(20);
+    commandSetEnable(motor, true);
+    delay(20);
+    requestEnableStatus(motor);
+    requestStallStatus(motor);
+    requestEncoder(motor);
+    delay(5);
   }
 
   return true;
