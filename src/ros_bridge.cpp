@@ -22,7 +22,7 @@
 #include <std_msgs/msg/string.h>
 
 #include "config.h"
-#include "machine.h"
+#include "robot_tasks.h"
 
 static rcl_allocator_t allocator;
 static rcl_init_options_t initOptions;
@@ -63,6 +63,20 @@ static char frameIdBuffer[] = "palletizer_base";
 static char jointNameBuffers[4][4] = {"X1", "X2", "Y", "Z"};
 
 static bool rosReady = false;
+static bool initOptionsInitialized = false;
+static bool supportInitialized = false;
+static bool nodeInitialized = false;
+static bool executorInitialized = false;
+static bool telemetryTimerInitialized = false;
+static bool jointStatePublisherInitialized = false;
+static bool axisPositionPublisherInitialized = false;
+static bool motorRpmPublisherInitialized = false;
+static bool statusPublisherInitialized = false;
+static bool faultPublisherInitialized = false;
+static bool emergencyStopSubscriberInitialized = false;
+static bool moveActionServerInitialized = false;
+static uint32_t lastRosReconnectAttemptMs = 0;
+static uint32_t lastRosHealthCheckMs = 0;
 static rclc_action_goal_handle_t *activeMoveGoal = nullptr;
 static float moveTargetX = 0.0f;
 static float moveTargetY = 0.0f;
@@ -73,13 +87,80 @@ static float moveStartZ = 0.0f;
 static float moveToleranceMm = 1.0f;
 static uint32_t moveStartedMs = 0;
 static uint32_t moveTimeoutMs = 30000;
+static uint32_t movePositionStableSinceMs = 0;
 static bool moveResultPending = false;
 static rcl_action_goal_state_t movePendingResultState = GOAL_STATE_UNKNOWN;
 static bool movePendingResultSuccess = false;
 static const char *movePendingResultMessage = "";
+static uint32_t moveControlCommandId = 0;
+static bool moveControlCommandAccepted = false;
 
 static bool check(rcl_ret_t result) {
   return result == RCL_RET_OK;
+}
+
+static void ignoreRclRet(rcl_ret_t result) {
+  (void)result;
+}
+
+static void zeroRosHandles() {
+  initOptions = rcl_get_zero_initialized_init_options();
+  support = {};
+  node = rcl_get_zero_initialized_node();
+  telemetryTimer = rcl_get_zero_initialized_timer();
+  executor = rclc_executor_get_zero_initialized_executor();
+  jointStatePublisher = rcl_get_zero_initialized_publisher();
+  axisPositionPublisher = rcl_get_zero_initialized_publisher();
+  motorRpmPublisher = rcl_get_zero_initialized_publisher();
+  statusPublisher = rcl_get_zero_initialized_publisher();
+  faultPublisher = rcl_get_zero_initialized_publisher();
+  emergencyStopSubscriber = rcl_get_zero_initialized_subscription();
+  moveActionServer = {};
+}
+
+static void resetRosRuntimeState() {
+  activeMoveGoal = nullptr;
+  moveResultPending = false;
+  movePositionStableSinceMs = 0;
+  moveControlCommandId = 0;
+  moveControlCommandAccepted = false;
+}
+
+static void resetRosInitFlags() {
+  initOptionsInitialized = false;
+  supportInitialized = false;
+  nodeInitialized = false;
+  executorInitialized = false;
+  telemetryTimerInitialized = false;
+  jointStatePublisherInitialized = false;
+  axisPositionPublisherInitialized = false;
+  motorRpmPublisherInitialized = false;
+  statusPublisherInitialized = false;
+  faultPublisherInitialized = false;
+  emergencyStopSubscriberInitialized = false;
+  moveActionServerInitialized = false;
+}
+
+static void disconnectRosBridge() {
+  rosReady = false;
+  resetRosRuntimeState();
+
+  if (executorInitialized) ignoreRclRet(rclc_executor_fini(&executor));
+  if (moveActionServerInitialized) ignoreRclRet(rclc_action_server_fini(&moveActionServer, &node));
+  if (emergencyStopSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&emergencyStopSubscriber, &node));
+  if (faultPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&faultPublisher, &node));
+  if (statusPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&statusPublisher, &node));
+  if (motorRpmPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&motorRpmPublisher, &node));
+  if (axisPositionPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&axisPositionPublisher, &node));
+  if (jointStatePublisherInitialized) ignoreRclRet(rcl_publisher_fini(&jointStatePublisher, &node));
+  if (telemetryTimerInitialized) ignoreRclRet(rcl_timer_fini(&telemetryTimer));
+  if (nodeInitialized) ignoreRclRet(rcl_node_fini(&node));
+  if (supportInitialized) ignoreRclRet(rclc_support_fini(&support));
+  if (initOptionsInitialized) ignoreRclRet(rcl_init_options_fini(&initOptions));
+
+  rcl_reset_error();
+  resetRosInitFlags();
+  zeroRosHandles();
 }
 
 static void setString(rosidl_runtime_c__String &text, char *buffer, size_t capacity, size_t size = 0) {
@@ -105,14 +186,50 @@ static float distance3(float x, float y, float z) {
 }
 
 static float commandablePositionMm(float mm) {
-  return encoderCountsToMm(mmToEncoderCounts(mm));
+  return robotCommandablePositionMm(mm);
+}
+
+static float maxMoveErrorMm() {
+  RobotStateSnapshot state;
+  if (!getRobotStateSnapshot(state) || !state.axisPositionsValid) return INFINITY;
+
+  float maxError = fabsf(moveTargetX - state.axisPositionMm[0]);
+  const float yError = fabsf(moveTargetY - state.axisPositionMm[1]);
+  const float zError = fabsf(moveTargetZ - state.axisPositionMm[2]);
+  if (yError > maxError) maxError = yError;
+  if (zError > maxError) maxError = zError;
+  return maxError;
+}
+
+static bool measuredPositionIsStableAtTarget() {
+  RobotStateSnapshot state;
+  if (!getRobotStateSnapshot(state) || !state.axisPositionsValid) {
+    movePositionStableSinceMs = 0;
+    return false;
+  }
+
+  const float settleTolerance = moveToleranceMm > ACTION_RESULT_MIN_TOLERANCE_MM
+                                    ? moveToleranceMm
+                                    : ACTION_RESULT_MIN_TOLERANCE_MM;
+  if (maxMoveErrorMm() > settleTolerance) {
+    movePositionStableSinceMs = 0;
+    return false;
+  }
+
+  const uint32_t now = millis();
+  if (movePositionStableSinceMs == 0) {
+    movePositionStableSinceMs = now;
+    return false;
+  }
+  return now - movePositionStableSinceMs >= ACTION_RESULT_POSITION_STABLE_MS;
 }
 
 static void fillMoveFeedback(const char *state) {
-  float currentX = 0.0f;
-  float currentY = 0.0f;
-  float currentZ = 0.0f;
-  getAxisPositionsMm(currentX, currentY, currentZ);
+  RobotStateSnapshot snapshot;
+  const bool haveSnapshot = getRobotStateSnapshot(snapshot);
+  const float currentX = haveSnapshot ? snapshot.axisPositionMm[0] : 0.0f;
+  const float currentY = haveSnapshot ? snapshot.axisPositionMm[1] : 0.0f;
+  const float currentZ = haveSnapshot ? snapshot.axisPositionMm[2] : 0.0f;
 
   moveFeedbackMsg.feedback.current_x_mm = currentX;
   moveFeedbackMsg.feedback.current_y_mm = currentY;
@@ -127,7 +244,7 @@ static void fillMoveFeedback(const char *state) {
       moveFeedbackMsg.feedback.error_y_mm,
       moveFeedbackMsg.feedback.error_z_mm);
   if (totalDistance <= 0.001f) {
-    moveFeedbackMsg.feedback.progress = isAtXYZMm(moveTargetX, moveTargetY, moveTargetZ, moveToleranceMm) ? 1.0f : 0.0f;
+    moveFeedbackMsg.feedback.progress = maxMoveErrorMm() <= moveToleranceMm ? 1.0f : 0.0f;
   } else {
     moveFeedbackMsg.feedback.progress = 1.0f - (remainingDistance / totalDistance);
     if (moveFeedbackMsg.feedback.progress < 0.0f) moveFeedbackMsg.feedback.progress = 0.0f;
@@ -140,16 +257,14 @@ static void fillMoveFeedback(const char *state) {
 static rcl_ret_t finishMoveGoal(rcl_action_goal_state_t state, bool success, const char *message) {
   if (!activeMoveGoal) return RCL_RET_ERROR;
 
-  float finalX = 0.0f;
-  float finalY = 0.0f;
-  float finalZ = 0.0f;
-  getAxisPositionsMm(finalX, finalY, finalZ);
+  RobotStateSnapshot snapshot;
+  getRobotStateSnapshot(snapshot);
 
   moveResultResponse.status = state;
   moveResultResponse.result.success = success;
-  moveResultResponse.result.final_x_mm = finalX;
-  moveResultResponse.result.final_y_mm = finalY;
-  moveResultResponse.result.final_z_mm = finalZ;
+  moveResultResponse.result.final_x_mm = snapshot.axisPositionMm[0];
+  moveResultResponse.result.final_y_mm = snapshot.axisPositionMm[1];
+  moveResultResponse.result.final_z_mm = snapshot.axisPositionMm[2];
   setMoveResultMessage(message);
 
   const rcl_ret_t result = rclc_action_send_result(activeMoveGoal, state, &moveResultResponse);
@@ -184,77 +299,66 @@ static void stampJointState() {
 static void fillTelemetryMessages() {
   stampJointState();
 
-  float xSumMm = 0.0f;
-  uint8_t xSamples = 0;
-  const uint32_t now = millis();
+  RobotStateSnapshot snapshot;
+  getRobotStateSnapshot(snapshot);
 
   for (size_t i = 0; i < 4; i++) {
-    const MotorNode &motor = motors[i];
-    if (motor.encoderOk) {
-      const float mm = encoderCountsToMm(motor.encoder);
-      jointPositions[i] = static_cast<double>(mm) / 1000.0;
-      if (i < 2) {
-        xSumMm += mm;
-        xSamples++;
-      } else {
-        axisPositionsMm[i - 1] = mm;
-      }
-    } else {
-      jointPositions[i] = 0.0;
-      if (i >= 2) axisPositionsMm[i - 1] = 0.0f;
-    }
-
-    jointVelocities[i] = motor.rpmOk
-                             ? static_cast<double>(motor.rpm) * LEADSCREW_MM_PER_REV / 60000.0
+    jointPositions[i] = snapshot.encoderOk[i]
+                            ? static_cast<double>(snapshot.motorPositionMm[i]) / 1000.0
+                            : 0.0;
+    jointVelocities[i] = snapshot.rpmOk[i]
+                             ? static_cast<double>(snapshot.motorRpm[i]) * LEADSCREW_MM_PER_REV / 60000.0
                              : 0.0;
     jointEfforts[i] = 0.0;
-    motorRpms[i] = motor.rpmOk ? static_cast<float>(motor.rpm) : 0.0f;
+    motorRpms[i] = snapshot.rpmOk[i] ? static_cast<float>(snapshot.motorRpm[i]) : 0.0f;
   }
 
-  axisPositionsMm[0] = xSamples ? xSumMm / xSamples : 0.0f;
+  axisPositionsMm[0] = snapshot.axisPositionsValid ? snapshot.axisPositionMm[0] : 0.0f;
+  axisPositionsMm[1] = snapshot.axisPositionsValid ? snapshot.axisPositionMm[1] : 0.0f;
+  axisPositionsMm[2] = snapshot.axisPositionsValid ? snapshot.axisPositionMm[2] : 0.0f;
 
   const int written = snprintf(
       statusBuffer,
       sizeof(statusBuffer),
       "{\"fault\":%u,\"reason\":\"%s\",\"online\":[%u,%u,%u,%u],\"enc\":[%lld,%lld,%lld,%lld],\"mm\":[%.3f,%.3f,%.3f,%.3f],\"rpm\":[%d,%d,%d,%d],\"acc\":[%u,%u,%u,%u],\"moveStatus\":[%u,%u,%u,%u],\"homeStatus\":[%u,%u,%u,%u]}",
-      safetyFaultIsActive() ? 1 : 0,
-      safetyFaultText(),
-      motorIsOnline(motors[0], now) ? 1 : 0,
-      motorIsOnline(motors[1], now) ? 1 : 0,
-      motorIsOnline(motors[2], now) ? 1 : 0,
-      motorIsOnline(motors[3], now) ? 1 : 0,
-      static_cast<long long>(motors[0].encoderOk ? motors[0].encoder : 0),
-      static_cast<long long>(motors[1].encoderOk ? motors[1].encoder : 0),
-      static_cast<long long>(motors[2].encoderOk ? motors[2].encoder : 0),
-      static_cast<long long>(motors[3].encoderOk ? motors[3].encoder : 0),
-      motors[0].encoderOk ? encoderCountsToMm(motors[0].encoder) : 0.0f,
-      motors[1].encoderOk ? encoderCountsToMm(motors[1].encoder) : 0.0f,
-      motors[2].encoderOk ? encoderCountsToMm(motors[2].encoder) : 0.0f,
-      motors[3].encoderOk ? encoderCountsToMm(motors[3].encoder) : 0.0f,
-      motors[0].rpmOk ? motors[0].rpm : 0,
-      motors[1].rpmOk ? motors[1].rpm : 0,
-      motors[2].rpmOk ? motors[2].rpm : 0,
-      motors[3].rpmOk ? motors[3].rpm : 0,
-      motors[0].lastAcc,
-      motors[1].lastAcc,
-      motors[2].lastAcc,
-      motors[3].lastAcc,
-      motors[0].moveStatus,
-      motors[1].moveStatus,
-      motors[2].moveStatus,
-      motors[3].moveStatus,
-      motors[0].homeStatus,
-      motors[1].homeStatus,
-      motors[2].homeStatus,
-      motors[3].homeStatus);
+      snapshot.safetyFault ? 1 : 0,
+      snapshot.safetyReason,
+      snapshot.motorOnline[0] ? 1 : 0,
+      snapshot.motorOnline[1] ? 1 : 0,
+      snapshot.motorOnline[2] ? 1 : 0,
+      snapshot.motorOnline[3] ? 1 : 0,
+      static_cast<long long>(snapshot.encoder[0]),
+      static_cast<long long>(snapshot.encoder[1]),
+      static_cast<long long>(snapshot.encoder[2]),
+      static_cast<long long>(snapshot.encoder[3]),
+      snapshot.motorPositionMm[0],
+      snapshot.motorPositionMm[1],
+      snapshot.motorPositionMm[2],
+      snapshot.motorPositionMm[3],
+      snapshot.motorRpm[0],
+      snapshot.motorRpm[1],
+      snapshot.motorRpm[2],
+      snapshot.motorRpm[3],
+      snapshot.lastAcc[0],
+      snapshot.lastAcc[1],
+      snapshot.lastAcc[2],
+      snapshot.lastAcc[3],
+      snapshot.moveStatus[0],
+      snapshot.moveStatus[1],
+      snapshot.moveStatus[2],
+      snapshot.moveStatus[3],
+      snapshot.homeStatus[0],
+      snapshot.homeStatus[1],
+      snapshot.homeStatus[2],
+      snapshot.homeStatus[3]);
   statusMsg.data.size = written > 0 ? min(static_cast<size_t>(written), sizeof(statusBuffer) - 1) : 0;
 
   const int faultWritten = snprintf(
       faultBuffer,
       sizeof(faultBuffer),
       "%s:%s",
-      safetyFaultIsActive() ? "FAULT" : "OK",
-      safetyFaultText());
+      snapshot.safetyFault ? "FAULT" : "OK",
+      snapshot.safetyReason);
   faultMsg.data.size = faultWritten > 0 ? min(static_cast<size_t>(faultWritten), sizeof(faultBuffer) - 1) : 0;
 }
 
@@ -276,29 +380,50 @@ static void publishTelemetry(rcl_timer_t *, int64_t) {
     }
 
     if (activeMoveGoal->goal_cancelled) {
-      stopAllMotors();
+      robotRequestStop();
       fillMoveFeedback("canceled");
       rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
       queueMoveResult(GOAL_STATE_CANCELED, false, "goal canceled");
       return;
     }
 
-    if (safetyFaultIsActive()) {
+    RobotStateSnapshot snapshot;
+    getRobotStateSnapshot(snapshot);
+
+    if (snapshot.safetyFault) {
       fillMoveFeedback("fault");
       rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
-      queueMoveResult(GOAL_STATE_ABORTED, false, safetyFaultText());
+      queueMoveResult(GOAL_STATE_ABORTED, false, snapshot.safetyReason);
       return;
     }
 
+    if (!moveControlCommandAccepted) {
+      bool known = false;
+      bool accepted = false;
+      robotGetMoveCommandStatus(moveControlCommandId, known, accepted);
+      if (!known) {
+        fillMoveFeedback("queued");
+        rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+        return;
+      }
+      if (!accepted) {
+        fillMoveFeedback("rejected_by_control");
+        rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+        queueMoveResult(GOAL_STATE_ABORTED, false, "control rejected move command");
+        return;
+      }
+      moveControlCommandAccepted = true;
+    }
+
     if (millis() - moveStartedMs > moveTimeoutMs) {
-      stopAllMotors();
+      robotRequestStop();
       fillMoveFeedback("timeout");
       rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
       queueMoveResult(GOAL_STATE_ABORTED, false, "timeout before reaching target");
       return;
     }
 
-    if (isAtXYZMm(moveTargetX, moveTargetY, moveTargetZ, moveToleranceMm)) {
+    if (measuredPositionIsStableAtTarget()) {
       fillMoveFeedback("arrived");
       moveFeedbackMsg.feedback.progress = 1.0f;
       rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
@@ -306,7 +431,7 @@ static void publishTelemetry(rcl_timer_t *, int64_t) {
       return;
     }
 
-    fillMoveFeedback(axisPositionsAreValid() ? "moving" : "waiting_for_encoders");
+    fillMoveFeedback(snapshot.axisPositionsValid ? "moving" : "waiting_for_encoders");
     rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
   }
 }
@@ -314,7 +439,7 @@ static void publishTelemetry(rcl_timer_t *, int64_t) {
 static void onEmergencyStop(const void *msgIn) {
   const std_msgs__msg__Bool *msg = static_cast<const std_msgs__msg__Bool *>(msgIn);
   if (msg->data) {
-    stopAllMotors();
+    robotRequestEmergencyStop();
   }
 }
 
@@ -336,17 +461,26 @@ static rcl_ret_t onMoveGoal(rclc_action_goal_handle_t *goalHandle, void *) {
   moveToleranceMm = request->goal.tolerance_mm > 0.0f ? request->goal.tolerance_mm : 1.0f;
   moveTimeoutMs = request->goal.timeout_ms > 0 ? request->goal.timeout_ms : 30000;
   moveStartedMs = millis();
+  movePositionStableSinceMs = 0;
   moveResultPending = false;
-  getAxisPositionsMm(moveStartX, moveStartY, moveStartZ);
+  moveControlCommandId = 0;
+  moveControlCommandAccepted = false;
 
-  const bool commandAccepted = commandMoveXYZMm(
+  RobotStateSnapshot snapshot;
+  getRobotStateSnapshot(snapshot);
+  moveStartX = snapshot.axisPositionMm[0];
+  moveStartY = snapshot.axisPositionMm[1];
+  moveStartZ = snapshot.axisPositionMm[2];
+
+  const bool commandQueued = robotRequestMoveXYZMm(
       requestedX,
       requestedY,
       requestedZ,
       request->goal.speed_mm_s,
-      request->goal.accel_mm_s2);
+      request->goal.accel_mm_s2,
+      moveControlCommandId);
 
-  if (!commandAccepted) {
+  if (!commandQueued) {
     return RCL_RET_ACTION_GOAL_REJECTED;
   }
 
@@ -358,7 +492,7 @@ static rcl_ret_t onMoveGoal(rclc_action_goal_handle_t *goalHandle, void *) {
 
 static bool onMoveCancel(rclc_action_goal_handle_t *goalHandle, void *) {
   if (goalHandle != activeMoveGoal) return false;
-  stopAllMotors();
+  robotRequestStop();
   return true;
 }
 
@@ -410,46 +544,93 @@ bool beginRosBridge() {
   set_microros_serial_transports(Serial);
   allocator = rcl_get_default_allocator();
 
-  if (rmw_uros_ping_agent(100, 3) != RCL_RET_OK) {
+  if (rmw_uros_ping_agent(MICRO_ROS_PING_TIMEOUT_MS, MICRO_ROS_PING_ATTEMPTS) != RCL_RET_OK) {
     return false;
   }
 
+  zeroRosHandles();
+  resetRosInitFlags();
+  resetRosRuntimeState();
+
   initOptions = rcl_get_zero_initialized_init_options();
-  if (!check(rcl_init_options_init(&initOptions, allocator))) return false;
-  if (!check(rcl_init_options_set_domain_id(&initOptions, MICRO_ROS_DOMAIN_ID))) return false;
-  if (!check(rclc_support_init_with_options(&support, 0, nullptr, &initOptions, &allocator))) return false;
-  if (!check(rclc_node_init_default(&node, "palletizer_controller", "", &support))) return false;
+  if (!check(rcl_init_options_init(&initOptions, allocator))) {
+    disconnectRosBridge();
+    return false;
+  }
+  initOptionsInitialized = true;
+  if (!check(rcl_init_options_set_domain_id(&initOptions, MICRO_ROS_DOMAIN_ID))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_support_init_with_options(&support, 0, nullptr, &initOptions, &allocator))) {
+    disconnectRosBridge();
+    return false;
+  }
+  supportInitialized = true;
+  if (!check(rclc_node_init_default(&node, "palletizer_controller", "", &support))) {
+    disconnectRosBridge();
+    return false;
+  }
+  nodeInitialized = true;
 
   if (!check(rclc_publisher_init_default(
           &jointStatePublisher, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, JointState),
-          "/joint_states"))) return false;
+          "/joint_states"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  jointStatePublisherInitialized = true;
   if (!check(rclc_publisher_init_default(
           &axisPositionPublisher, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-          "/palletizer/axis_position_mm"))) return false;
+          "/palletizer/axis_position_mm"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  axisPositionPublisherInitialized = true;
   if (!check(rclc_publisher_init_default(
           &motorRpmPublisher, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-          "/palletizer/motor_rpm"))) return false;
+          "/palletizer/motor_rpm"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  motorRpmPublisherInitialized = true;
   if (!check(rclc_publisher_init_default(
           &statusPublisher, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
-          "/palletizer/status"))) return false;
+          "/palletizer/status"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  statusPublisherInitialized = true;
   if (!check(rclc_publisher_init_default(
           &faultPublisher, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
-          "/palletizer/fault_state"))) return false;
+          "/palletizer/fault_state"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  faultPublisherInitialized = true;
   if (!check(rclc_subscription_init_best_effort(
           &emergencyStopSubscriber, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-          "/palletizer/emergency_stop"))) return false;
+          "/palletizer/emergency_stop"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  emergencyStopSubscriberInitialized = true;
   if (!check(rclc_action_server_init_default(
           &moveActionServer,
           &node,
           &support,
           ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, MoveXYZ),
-          "/palletizer/move_xyz"))) return false;
+          "/palletizer/move_xyz"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  moveActionServerInitialized = true;
 
   initMessages();
 
@@ -457,16 +638,30 @@ bool beginRosBridge() {
           &telemetryTimer,
           &support,
           RCL_MS_TO_NS(50),
-          publishTelemetry))) return false;
+          publishTelemetry))) {
+    disconnectRosBridge();
+    return false;
+  }
+  telemetryTimerInitialized = true;
 
-  if (!check(rclc_executor_init(&executor, &support.context, 3, &allocator))) return false;
-  if (!check(rclc_executor_add_timer(&executor, &telemetryTimer))) return false;
+  if (!check(rclc_executor_init(&executor, &support.context, 3, &allocator))) {
+    disconnectRosBridge();
+    return false;
+  }
+  executorInitialized = true;
+  if (!check(rclc_executor_add_timer(&executor, &telemetryTimer))) {
+    disconnectRosBridge();
+    return false;
+  }
   if (!check(rclc_executor_add_subscription(
           &executor,
           &emergencyStopSubscriber,
           &emergencyStopMsg,
           onEmergencyStop,
-          ON_NEW_DATA))) return false;
+          ON_NEW_DATA))) {
+    disconnectRosBridge();
+    return false;
+  }
   if (!check(rclc_executor_add_action_server(
           &executor,
           &moveActionServer,
@@ -475,15 +670,38 @@ bool beginRosBridge() {
           sizeof(moveGoalRequest),
           onMoveGoal,
           onMoveCancel,
-          nullptr))) return false;
+          nullptr))) {
+    disconnectRosBridge();
+    return false;
+  }
 
   rmw_uros_sync_session(1000);
+  lastRosHealthCheckMs = millis();
   rosReady = true;
   return true;
 }
 
 bool rosBridgeReady() {
   return rosReady;
+}
+
+void manageRosBridge() {
+  const uint32_t now = millis();
+  if (!rosReady) {
+    if (now - lastRosReconnectAttemptMs >= MICRO_ROS_RECONNECT_PERIOD_MS) {
+      lastRosReconnectAttemptMs = now;
+      beginRosBridge();
+    }
+    return;
+  }
+
+  if (now - lastRosHealthCheckMs < MICRO_ROS_HEALTH_CHECK_PERIOD_MS) return;
+  lastRosHealthCheckMs = now;
+
+  if (rmw_uros_ping_agent(MICRO_ROS_PING_TIMEOUT_MS, MICRO_ROS_PING_ATTEMPTS) != RCL_RET_OK) {
+    disconnectRosBridge();
+    lastRosReconnectAttemptMs = now;
+  }
 }
 
 void spinRosBridge() {
@@ -500,6 +718,8 @@ bool beginRosBridge() {
 bool rosBridgeReady() {
   return true;
 }
+
+void manageRosBridge() {}
 
 void spinRosBridge() {}
 

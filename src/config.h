@@ -37,6 +37,21 @@ static constexpr uint8_t CAN_COMMAND_TX_RETRIES = 3;
 static constexpr uint32_t MOTOR_ONLINE_TIMEOUT_MS = 1500;
 static constexpr uint32_t SERIAL_BAUD = 115200;
 static constexpr size_t MICRO_ROS_DOMAIN_ID = 10;
+static constexpr BaseType_t CONTROL_TASK_CORE = 1;
+static constexpr BaseType_t ROS_TASK_CORE = 0;
+static constexpr UBaseType_t CONTROL_TASK_PRIORITY = 4;
+static constexpr UBaseType_t ROS_TASK_PRIORITY = 2;
+static constexpr uint32_t CONTROL_TASK_STACK_BYTES = 8192;
+static constexpr uint32_t ROS_TASK_STACK_BYTES = 16384;
+static constexpr uint32_t CONTROL_TASK_PERIOD_MS = 1;
+static constexpr uint32_t ROS_TASK_PERIOD_MS = 1;
+static constexpr uint8_t ROBOT_COMMAND_QUEUE_LENGTH = 4;
+static constexpr uint32_t MICRO_ROS_RECONNECT_PERIOD_MS = 1000;
+static constexpr uint32_t MICRO_ROS_HEALTH_CHECK_PERIOD_MS = 1000;
+static constexpr int MICRO_ROS_PING_TIMEOUT_MS = 20;
+static constexpr uint8_t MICRO_ROS_PING_ATTEMPTS = 1;
+static constexpr float ACTION_RESULT_MIN_TOLERANCE_MM = 2.0f;
+static constexpr uint32_t ACTION_RESULT_POSITION_STABLE_MS = 250;
 
 // Husillo: una vuelta completa del motor desplaza linealmente 8 mm.
 // El encoder MKS reporta 16384 cuentas por vuelta.

@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include "config.h"
 #include "machine.h"
+#include "robot_tasks.h"
 #include "ros_bridge.h"
 #include "serial_commands.h"
 
@@ -35,7 +36,7 @@ void setup() {
 #endif
 
 #if ENABLE_MICRO_ROS
-  beginRosBridge();
+  beginRobotTasks();
 #else
   printHelp();
 #endif
@@ -44,15 +45,9 @@ void setup() {
 void loop() {
 #if !ENABLE_MICRO_ROS
   handleSerialInput();
-#else
-  static uint32_t lastRosConnectAttemptMs = 0;
-  const uint32_t nowMs = millis();
-  if (!rosBridgeReady() && nowMs - lastRosConnectAttemptMs >= 1000) {
-    lastRosConnectAttemptMs = nowMs;
-    beginRosBridge();
-  }
-#endif
   pollEncoders();
   drainCanReplies();
-  spinRosBridge();
+#else
+  vTaskDelay(pdMS_TO_TICKS(1000));
+#endif
 }

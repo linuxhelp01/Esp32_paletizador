@@ -4,4 +4,5 @@
 
 bool beginRosBridge();
 bool rosBridgeReady();
+void manageRosBridge();
 void spinRosBridge();

@@ -3,6 +3,20 @@
 #include "config.h"
 #include "mks_can.h"
 
+#if ENABLE_MICRO_ROS
+struct NullDebugSerial {
+  template <typename... Args>
+  void print(Args...) {}
+
+  template <typename... Args>
+  void println(Args...) {}
+};
+
+static NullDebugSerial DebugSerial;
+#else
+#define DebugSerial Serial
+#endif
+
 MotorNode motors[4] = {
   MotorNode("X1", CAN_ID_PHYSICAL_Y1, MOTOR_DIR_PHYSICAL_Y1),
   MotorNode("X2", CAN_ID_PHYSICAL_Y2, MOTOR_DIR_PHYSICAL_Y2),
@@ -75,8 +89,8 @@ static int8_t signOfDelta(int64_t value) {
 
 static void setSafetyFault(const char *reason) {
   if (!safetyFaultActive) {
-    Serial.print("SAFETY FAULT: ");
-    Serial.println(reason);
+    DebugSerial.print("SAFETY FAULT: ");
+    DebugSerial.println(reason);
   }
   safetyFaultActive = true;
   safetyFaultReason = reason;
@@ -93,8 +107,8 @@ static bool xPairSamplesCloseEnough(bool report) {
                               : x2.lastEncoderUpdateMs - x1.lastEncoderUpdateMs;
   if (skewMs <= X_PAIR_ALIGNMENT_SAMPLE_SKEW_MS) return true;
   if (report) {
-    Serial.print("X ERROR: muestras X1/X2 no sincronizadas, skewMs=");
-    Serial.println(skewMs);
+    DebugSerial.print("X ERROR: muestras X1/X2 no sincronizadas, skewMs=");
+    DebugSerial.println(skewMs);
   }
   return false;
 }
@@ -103,7 +117,7 @@ static bool isXPairAligned(bool requireFreshSamples = false) {
   const MotorNode &x1 = motors[0];
   const MotorNode &x2 = motors[1];
   if (!x1.encoderOk || !x2.encoderOk) {
-    Serial.println("X ERROR: falta lectura de encoder en X1 o X2");
+    DebugSerial.println("X ERROR: falta lectura de encoder en X1 o X2");
     commandStopAll();
     return false;
   }
@@ -115,10 +129,10 @@ static bool isXPairAligned(bool requireFreshSamples = false) {
 
   const int64_t error = x1.encoder - x2.encoder;
   if (llabs(error) > X_PAIR_MAX_ERROR_COUNTS) {
-    Serial.print("X ERROR: X1/X2 desalineados, errorEnc=");
-    Serial.print(error);
-    Serial.print(" errorMm=");
-    Serial.println(encoderCountsToMm(error), 3);
+    DebugSerial.print("X ERROR: X1/X2 desalineados, errorEnc=");
+    DebugSerial.print(error);
+    DebugSerial.print(" errorMm=");
+    DebugSerial.println(encoderCountsToMm(error), 3);
     commandStopAll();
     return false;
   }
@@ -128,8 +142,8 @@ static bool isXPairAligned(bool requireFreshSamples = false) {
 
 static bool safetyAllowsMotion() {
   if (!safetyFaultActive) return true;
-  Serial.print("SAFETY ERROR: falla activa, ejecute FAULT RESET. motivo=");
-  Serial.println(safetyFaultReason);
+  DebugSerial.print("SAFETY ERROR: falla activa, ejecute FAULT RESET. motivo=");
+  DebugSerial.println(safetyFaultReason);
   commandStopAll();
   return false;
 }
@@ -137,7 +151,7 @@ static bool safetyAllowsMotion() {
 static bool axisIsSafeForMotion(Axis axis) {
   if (!safetyAllowsMotion()) return false;
   if (axis == Axis::X1 || axis == Axis::X2) {
-    Serial.println("X ERROR: X1 y X2 no se mueven por separado. Usa eje X.");
+    DebugSerial.println("X ERROR: X1 y X2 no se mueven por separado. Usa eje X.");
     return false;
   }
   if (axis == Axis::X) return isXPairAligned();
@@ -208,7 +222,7 @@ static bool resetSafetyFault() {
 
   safetyFaultActive = false;
   safetyFaultReason = "OK";
-  Serial.println("SAFETY RESET OK: falla liberada, funcionamiento normal habilitado.");
+  DebugSerial.println("SAFETY RESET OK: falla liberada, funcionamiento normal habilitado.");
   return true;
 }
 
@@ -540,76 +554,76 @@ void pollEncoders() {
 }
 
 void printHelp() {
-  Serial.println();
-  Serial.println("Comandos:");
-  Serial.println("  HELLO");
-  Serial.println("  POS <X|Y|Z> <encoder_abs> [rpm] [acc]");
-  Serial.println("      Posicion angular absoluta del motor en cuentas de encoder.");
-  Serial.println("  POSANG <X|Y|Z> <encoder_abs> [rpm] [rpm_s]");
-  Serial.println("      Posicion angular. En X mueve X1/X2 juntos.");
-  Serial.println("  POSMM <X|Y|Z> <mm_abs> [rpm] [acc]");
-  Serial.println("      Posicion lineal absoluta del extremo del robot en milimetros.");
-  Serial.println("  POSLINE <X|Y|Z> <mm_abs> [mm_s] [mm_s2]");
-  Serial.println("      Eje del robot: posicion, velocidad y aceleracion lineal.");
-  Serial.println("  POSXYZ <x_mm> <y_mm> <z_mm> [mm_s] [mm_s2]");
-  Serial.println("      Movimiento lineal coordinado XYZ con disparo broadcast 4Bh.");
-  Serial.println("  SYNC <0|1>         (configura marca sincronizada MKS 4Ah por broadcast)");
-  Serial.println("  TRIGGER            (disparo sincronizado MKS 4Bh por broadcast)");
-  Serial.println("  VEL <X|Y|Z> <rpm> [acc]");
-  Serial.println("  VELANG <X|Y|Z> <rpm> [rpm_s]");
-  Serial.println("  HOME X            (homing simultaneo X1/X2)");
-  Serial.println("  HOME <X|Y|Z>");
-  Serial.println("  ZERO <X|Y|Z>");
-  Serial.println("  PING              (fuerza consulta CAN a todos los motores)");
-  Serial.println("  STOP");
-  Serial.println("  FAULT STATUS      (muestra el estado de seguridad)");
-  Serial.println("  FAULT RESET       (libera falla si X1/X2 tienen encoder valido y estan alineados)");
-  Serial.println("  FAULT TEST        (simula falla del eje X doble para probar enclavamiento)");
-  Serial.println("  STATUS");
-  Serial.println();
+  DebugSerial.println();
+  DebugSerial.println("Comandos:");
+  DebugSerial.println("  HELLO");
+  DebugSerial.println("  POS <X|Y|Z> <encoder_abs> [rpm] [acc]");
+  DebugSerial.println("      Posicion angular absoluta del motor en cuentas de encoder.");
+  DebugSerial.println("  POSANG <X|Y|Z> <encoder_abs> [rpm] [rpm_s]");
+  DebugSerial.println("      Posicion angular. En X mueve X1/X2 juntos.");
+  DebugSerial.println("  POSMM <X|Y|Z> <mm_abs> [rpm] [acc]");
+  DebugSerial.println("      Posicion lineal absoluta del extremo del robot en milimetros.");
+  DebugSerial.println("  POSLINE <X|Y|Z> <mm_abs> [mm_s] [mm_s2]");
+  DebugSerial.println("      Eje del robot: posicion, velocidad y aceleracion lineal.");
+  DebugSerial.println("  POSXYZ <x_mm> <y_mm> <z_mm> [mm_s] [mm_s2]");
+  DebugSerial.println("      Movimiento lineal coordinado XYZ con disparo broadcast 4Bh.");
+  DebugSerial.println("  SYNC <0|1>         (configura marca sincronizada MKS 4Ah por broadcast)");
+  DebugSerial.println("  TRIGGER            (disparo sincronizado MKS 4Bh por broadcast)");
+  DebugSerial.println("  VEL <X|Y|Z> <rpm> [acc]");
+  DebugSerial.println("  VELANG <X|Y|Z> <rpm> [rpm_s]");
+  DebugSerial.println("  HOME X            (homing simultaneo X1/X2)");
+  DebugSerial.println("  HOME <X|Y|Z>");
+  DebugSerial.println("  ZERO <X|Y|Z>");
+  DebugSerial.println("  PING              (fuerza consulta CAN a todos los motores)");
+  DebugSerial.println("  STOP");
+  DebugSerial.println("  FAULT STATUS      (muestra el estado de seguridad)");
+  DebugSerial.println("  FAULT RESET       (libera falla si X1/X2 tienen encoder valido y estan alineados)");
+  DebugSerial.println("  FAULT TEST        (simula falla del eje X doble para probar enclavamiento)");
+  DebugSerial.println("  STATUS");
+  DebugSerial.println();
 }
 
 void printStatus() {
-  Serial.println("STATUS");
-  Serial.print("  safetyFault=");
-  Serial.print(safetyFaultActive ? 1 : 0);
-  Serial.print(" reason=");
-  Serial.println(safetyFaultReason);
+  DebugSerial.println("STATUS");
+  DebugSerial.print("  safetyFault=");
+  DebugSerial.print(safetyFaultActive ? 1 : 0);
+  DebugSerial.print(" reason=");
+  DebugSerial.println(safetyFaultReason);
   const uint32_t now = millis();
   for (const MotorNode &motor : motors) {
     const bool online = motorIsOnline(motor, now);
-    Serial.print("  ");
-    Serial.print(motor.name);
-    Serial.print(" id=0x");
-    Serial.print(motor.canId, HEX);
-    Serial.print(" online=");
-    Serial.print(online ? 1 : 0);
-    Serial.print(" angularEnc=");
-    if (motor.encoderOk) Serial.print(motor.encoder);
-    else Serial.print("?");
-    Serial.print(" linearMm=");
-    if (motor.encoderOk) Serial.print(encoderCountsToMm(motor.encoder), 3);
-    else Serial.print("?");
-    Serial.print(" rpm=");
-    if (motor.rpmOk) Serial.print(motor.rpm);
-    else Serial.print("?");
-    Serial.print(" acc=");
-    Serial.print(motor.lastAcc);
-    Serial.print(" moveStatus=");
-    Serial.print(motor.moveStatus);
-    Serial.print(" homeStatus=");
-    Serial.print(motor.homeStatus);
-    Serial.print(" last=");
-    Serial.print(motor.lastSeenMs);
-    Serial.print(" rawEnc=");
-    if (motor.encoderOk) Serial.println(motor.rawEncoder);
-    else Serial.println("?");
+    DebugSerial.print("  ");
+    DebugSerial.print(motor.name);
+    DebugSerial.print(" id=0x");
+    DebugSerial.print(motor.canId, HEX);
+    DebugSerial.print(" online=");
+    DebugSerial.print(online ? 1 : 0);
+    DebugSerial.print(" angularEnc=");
+    if (motor.encoderOk) DebugSerial.print(motor.encoder);
+    else DebugSerial.print("?");
+    DebugSerial.print(" linearMm=");
+    if (motor.encoderOk) DebugSerial.print(encoderCountsToMm(motor.encoder), 3);
+    else DebugSerial.print("?");
+    DebugSerial.print(" rpm=");
+    if (motor.rpmOk) DebugSerial.print(motor.rpm);
+    else DebugSerial.print("?");
+    DebugSerial.print(" acc=");
+    DebugSerial.print(motor.lastAcc);
+    DebugSerial.print(" moveStatus=");
+    DebugSerial.print(motor.moveStatus);
+    DebugSerial.print(" homeStatus=");
+    DebugSerial.print(motor.homeStatus);
+    DebugSerial.print(" last=");
+    DebugSerial.print(motor.lastSeenMs);
+    DebugSerial.print(" rawEnc=");
+    if (motor.encoderOk) DebugSerial.println(motor.rawEncoder);
+    else DebugSerial.println("?");
   }
 }
 
 static void reportCommandResult(const char *label, bool ok) {
-  Serial.print(label);
-  Serial.println(ok ? " OK" : " ERROR");
+  DebugSerial.print(label);
+  DebugSerial.println(ok ? " OK" : " ERROR");
 }
 
 void handleMachineCommand(String line) {
@@ -622,7 +636,7 @@ void handleMachineCommand(String line) {
   }
 
   if (command == "HELLO") {
-    Serial.println("PALLETIZER_LINK_OK");
+    DebugSerial.println("PALLETIZER_LINK_OK");
     return;
   }
 
@@ -635,9 +649,9 @@ void handleMachineCommand(String line) {
     String subCommand = nextToken(line);
     subCommand.toUpperCase();
     if (subCommand == "STATUS" || subCommand.length() == 0) {
-      Serial.print("SAFETY ");
-      Serial.print(safetyFaultActive ? "FAULT " : "OK ");
-      Serial.println(safetyFaultReason);
+      DebugSerial.print("SAFETY ");
+      DebugSerial.print(safetyFaultActive ? "FAULT " : "OK ");
+      DebugSerial.println(safetyFaultReason);
       return;
     }
     if (subCommand == "RESET") {
@@ -649,7 +663,7 @@ void handleMachineCommand(String line) {
       reportCommandResult("FAULT TEST", safetyFaultActive);
       return;
     }
-    Serial.println("FAULT ERROR: usa FAULT STATUS, FAULT RESET o FAULT TEST.");
+    DebugSerial.println("FAULT ERROR: usa FAULT STATUS, FAULT RESET o FAULT TEST.");
     return;
   }
 
@@ -824,7 +838,7 @@ void handleMachineCommand(String line) {
       return;
     }
     if (axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) {
-      Serial.println("X ERROR: usa HOME X para referenciar X1/X2 juntos.");
+      DebugSerial.println("X ERROR: usa HOME X para referenciar X1/X2 juntos.");
       reportCommandResult("HOME", false);
       return;
     }
@@ -847,7 +861,7 @@ void handleMachineCommand(String line) {
       return;
     }
     if (axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) {
-      Serial.println("X ERROR: usa ZERO X para ajustar cero en X1/X2 juntos.");
+      DebugSerial.println("X ERROR: usa ZERO X para ajustar cero en X1/X2 juntos.");
       reportCommandResult("ZERO", false);
       return;
     }
@@ -859,8 +873,8 @@ void handleMachineCommand(String line) {
     return;
   }
 
-  Serial.print("Comando desconocido: ");
-  Serial.println(command);
+  DebugSerial.print("Comando desconocido: ");
+  DebugSerial.println(command);
   printHelp();
 }
 
