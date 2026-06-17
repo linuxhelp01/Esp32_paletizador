@@ -3,4 +3,5 @@
 #include <Arduino.h>
 
 bool beginRosBridge();
+bool rosBridgeReady();
 void spinRosBridge();

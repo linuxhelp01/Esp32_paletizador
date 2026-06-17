@@ -44,6 +44,13 @@ void setup() {
 void loop() {
 #if !ENABLE_MICRO_ROS
   handleSerialInput();
+#else
+  static uint32_t lastRosConnectAttemptMs = 0;
+  const uint32_t nowMs = millis();
+  if (!rosBridgeReady() && nowMs - lastRosConnectAttemptMs >= 1000) {
+    lastRosConnectAttemptMs = nowMs;
+    beginRosBridge();
+  }
 #endif
   pollEncoders();
   drainCanReplies();

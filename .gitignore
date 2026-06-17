@@ -5,3 +5,7 @@
 .vscode/ipch
 __pycache__/
 *.py[cod]
+.vscode/browse.vc.db
+.vscode/browse.vc.db-shm
+.vscode/browse.vc.db-wal
+.vscode/settings.json

@@ -3,6 +3,14 @@
 #include <Arduino.h>
 #include "driver/twai.h"
 
+#ifndef ENABLE_MICRO_ROS
+#error "ENABLE_MICRO_ROS must be defined by platformio.ini"
+#endif
+
+#if !ENABLE_MICRO_ROS
+#error "This firmware must be compiled with micro-ROS enabled"
+#endif
+
 // Pines ESP32-S3 hacia transceiver CAN, por ejemplo SN65HVD230.
 static constexpr gpio_num_t CAN_TX = GPIO_NUM_5;
 static constexpr gpio_num_t CAN_RX = GPIO_NUM_4;
@@ -28,6 +36,7 @@ static constexpr uint32_t MOTION_COMMAND_POLL_PAUSE_MS = 25;
 static constexpr uint8_t CAN_COMMAND_TX_RETRIES = 3;
 static constexpr uint32_t MOTOR_ONLINE_TIMEOUT_MS = 1500;
 static constexpr uint32_t SERIAL_BAUD = 115200;
+static constexpr size_t MICRO_ROS_DOMAIN_ID = 10;
 
 // Husillo: una vuelta completa del motor desplaza linealmente 8 mm.
 // El encoder MKS reporta 16384 cuentas por vuelta.

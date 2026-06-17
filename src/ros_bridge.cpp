@@ -21,6 +21,7 @@
 #include "machine.h"
 
 static rcl_allocator_t allocator;
+static rcl_init_options_t initOptions;
 static rclc_support_t support;
 static rcl_node_t node;
 static rcl_timer_t telemetryTimer;
@@ -210,6 +211,8 @@ static void initMessages() {
 }
 
 bool beginRosBridge() {
+  if (rosReady) return true;
+
   set_microros_serial_transports(Serial);
   allocator = rcl_get_default_allocator();
 
@@ -217,7 +220,10 @@ bool beginRosBridge() {
     return false;
   }
 
-  if (!check(rclc_support_init(&support, 0, nullptr, &allocator))) return false;
+  initOptions = rcl_get_zero_initialized_init_options();
+  if (!check(rcl_init_options_init(&initOptions, allocator))) return false;
+  if (!check(rcl_init_options_set_domain_id(&initOptions, MICRO_ROS_DOMAIN_ID))) return false;
+  if (!check(rclc_support_init_with_options(&support, 0, nullptr, &initOptions, &allocator))) return false;
   if (!check(rclc_node_init_default(&node, "palletizer_controller", "", &support))) return false;
 
   if (!check(rclc_publisher_init_default(
@@ -267,6 +273,10 @@ bool beginRosBridge() {
   return true;
 }
 
+bool rosBridgeReady() {
+  return rosReady;
+}
+
 void spinRosBridge() {
   if (!rosReady) return;
   rclc_executor_spin_some(&executor, RCL_MS_TO_NS(1));
@@ -275,6 +285,10 @@ void spinRosBridge() {
 #else
 
 bool beginRosBridge() {
+  return true;
+}
+
+bool rosBridgeReady() {
   return true;
 }
 
