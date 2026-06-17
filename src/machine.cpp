@@ -315,6 +315,41 @@ bool motorIsOnline(const MotorNode &motor, uint32_t nowMs) {
   return motor.lastSeenMs > 0 && (nowMs - motor.lastSeenMs) <= MOTOR_ONLINE_TIMEOUT_MS;
 }
 
+void getAxisPositionsMm(float &xMm, float &yMm, float &zMm) {
+  float xSumMm = 0.0f;
+  uint8_t xSamples = 0;
+
+  if (motors[0].encoderOk) {
+    xSumMm += encoderCountsToMm(motors[0].encoder);
+    xSamples++;
+  }
+  if (motors[1].encoderOk) {
+    xSumMm += encoderCountsToMm(motors[1].encoder);
+    xSamples++;
+  }
+
+  xMm = xSamples ? xSumMm / xSamples : 0.0f;
+  yMm = motors[2].encoderOk ? encoderCountsToMm(motors[2].encoder) : 0.0f;
+  zMm = motors[3].encoderOk ? encoderCountsToMm(motors[3].encoder) : 0.0f;
+}
+
+bool axisPositionsAreValid() {
+  return motors[0].encoderOk && motors[1].encoderOk && motors[2].encoderOk && motors[3].encoderOk;
+}
+
+bool isAtXYZMm(float xMm, float yMm, float zMm, float toleranceMm) {
+  if (!axisPositionsAreValid()) return false;
+
+  float currentX = 0.0f;
+  float currentY = 0.0f;
+  float currentZ = 0.0f;
+  getAxisPositionsMm(currentX, currentY, currentZ);
+
+  return fabsf(currentX - xMm) <= toleranceMm &&
+         fabsf(currentY - yMm) <= toleranceMm &&
+         fabsf(currentZ - zMm) <= toleranceMm;
+}
+
 static bool commandHome(MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_HOME, 0x00};
   return sendDriverCommand(motor.canId, cmd, sizeof(cmd));
@@ -378,6 +413,29 @@ static bool commandAbsolutePosition(MotorNode &motor, int32_t encoderTarget, uin
 
   const bool ok = sendDriverCommand(motor.canId, cmd, sizeof(cmd));
   if (ok) motor.lastAcc = acc;
+  return ok;
+}
+
+bool commandMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float accelMmS2) {
+  const int32_t xTarget = mmToEncoderCounts(xMm);
+  const int32_t yTarget = mmToEncoderCounts(yMm);
+  const int32_t zTarget = mmToEncoderCounts(zMm);
+  const uint16_t rpm = speedMmS > 0.0f ? linearSpeedMmSToRpm(speedMmS) : DEFAULT_RPM;
+  const uint8_t acc = accelMmS2 > 0.0f ? linearAccelMmS2ToMksAcc(accelMmS2) : DEFAULT_ACC;
+
+  if (!safetyAllowsMotion() || !isXPairAligned()) return false;
+
+  setXPairExpectedDirectionFromTarget(xTarget);
+  bool ok = commandPrepareSynchronizedMove();
+  ok &= commandAbsolutePosition(motors[0], xTarget, rpm, acc);
+  ok &= commandAbsolutePosition(motors[1], xTarget, rpm, acc);
+  ok &= commandAbsolutePosition(motors[2], yTarget, rpm, acc);
+  ok &= commandAbsolutePosition(motors[3], zTarget, rpm, acc);
+  if (ok) ok &= commandSyncTrigger();
+  if (!ok) {
+    xPairMotionMonitoringActive = false;
+    xPairExpectedDirection = 0;
+  }
   return ok;
 }
 
@@ -749,27 +807,12 @@ void handleMachineCommand(String line) {
   }
 
   if (command == "POSXYZ") {
-    const int32_t xTarget = mmToEncoderCounts(nextToken(line).toFloat());
-    const int32_t yTarget = mmToEncoderCounts(nextToken(line).toFloat());
-    const int32_t zTarget = mmToEncoderCounts(nextToken(line).toFloat());
-    uint16_t rpm = line.length() ? linearSpeedMmSToRpm(nextToken(line).toFloat()) : DEFAULT_RPM;
-    uint8_t acc = line.length() ? linearAccelMmS2ToMksAcc(nextToken(line).toFloat()) : DEFAULT_ACC;
-    if (!safetyAllowsMotion() || !isXPairAligned()) {
-      reportCommandResult("POSXYZ", false);
-      return;
-    }
-
-    setXPairExpectedDirectionFromTarget(xTarget);
-    bool ok = commandPrepareSynchronizedMove();
-    ok &= commandAbsolutePosition(motors[0], xTarget, rpm, acc);
-    ok &= commandAbsolutePosition(motors[1], xTarget, rpm, acc);
-    ok &= commandAbsolutePosition(motors[2], yTarget, rpm, acc);
-    ok &= commandAbsolutePosition(motors[3], zTarget, rpm, acc);
-    if (ok) ok &= commandSyncTrigger();
-    if (!ok) {
-      xPairMotionMonitoringActive = false;
-      xPairExpectedDirection = 0;
-    }
+    const float xMm = nextToken(line).toFloat();
+    const float yMm = nextToken(line).toFloat();
+    const float zMm = nextToken(line).toFloat();
+    const float speedMmS = line.length() ? nextToken(line).toFloat() : 0.0f;
+    const float accelMmS2 = line.length() ? nextToken(line).toFloat() : 0.0f;
+    const bool ok = commandMoveXYZMm(xMm, yMm, zMm, speedMmS, accelMmS2);
     reportCommandResult("POSXYZ", ok);
     return;
   }

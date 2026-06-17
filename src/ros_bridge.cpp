@@ -9,9 +9,13 @@
 #include <micro_ros_platformio.h>
 #include <rcl/error_handling.h>
 #include <rcl/rcl.h>
+#include <rcl_action/rcl_action.h>
+#include <rclc/action_goal_handle.h>
+#include <rclc/action_server.h>
 #include <rclc/executor.h>
 #include <rclc/rclc.h>
 #include <rmw_microros/rmw_microros.h>
+#include <palletizer_msgs/action/move_xyz.h>
 #include <sensor_msgs/msg/joint_state.h>
 #include <std_msgs/msg/bool.h>
 #include <std_msgs/msg/float32_multi_array.h>
@@ -33,6 +37,7 @@ static rcl_publisher_t motorRpmPublisher;
 static rcl_publisher_t statusPublisher;
 static rcl_publisher_t faultPublisher;
 static rcl_subscription_t emergencyStopSubscriber;
+static rclc_action_server_t moveActionServer;
 
 static sensor_msgs__msg__JointState jointStateMsg;
 static std_msgs__msg__Float32MultiArray axisPositionMsg;
@@ -40,6 +45,9 @@ static std_msgs__msg__Float32MultiArray motorRpmMsg;
 static std_msgs__msg__String statusMsg;
 static std_msgs__msg__String faultMsg;
 static std_msgs__msg__Bool emergencyStopMsg;
+static palletizer_msgs__action__MoveXYZ_SendGoal_Request moveGoalRequest;
+static palletizer_msgs__action__MoveXYZ_FeedbackMessage moveFeedbackMsg;
+static palletizer_msgs__action__MoveXYZ_GetResult_Response moveResultResponse;
 
 static rosidl_runtime_c__String jointNames[4];
 static double jointPositions[4];
@@ -49,10 +57,26 @@ static float axisPositionsMm[3];
 static float motorRpms[4];
 static char statusBuffer[512];
 static char faultBuffer[96];
+static char moveFeedbackStateBuffer[96];
+static char moveResultMessageBuffer[96];
 static char frameIdBuffer[] = "palletizer_base";
 static char jointNameBuffers[4][4] = {"X1", "X2", "Y", "Z"};
 
 static bool rosReady = false;
+static rclc_action_goal_handle_t *activeMoveGoal = nullptr;
+static float moveTargetX = 0.0f;
+static float moveTargetY = 0.0f;
+static float moveTargetZ = 0.0f;
+static float moveStartX = 0.0f;
+static float moveStartY = 0.0f;
+static float moveStartZ = 0.0f;
+static float moveToleranceMm = 1.0f;
+static uint32_t moveStartedMs = 0;
+static uint32_t moveTimeoutMs = 30000;
+static bool moveResultPending = false;
+static rcl_action_goal_state_t movePendingResultState = GOAL_STATE_UNKNOWN;
+static bool movePendingResultSuccess = false;
+static const char *movePendingResultMessage = "";
 
 static bool check(rcl_ret_t result) {
   return result == RCL_RET_OK;
@@ -62,6 +86,86 @@ static void setString(rosidl_runtime_c__String &text, char *buffer, size_t capac
   text.data = buffer;
   text.capacity = capacity;
   text.size = size;
+}
+
+static void setMoveFeedbackState(const char *state) {
+  const int written = snprintf(moveFeedbackStateBuffer, sizeof(moveFeedbackStateBuffer), "%s", state);
+  moveFeedbackMsg.feedback.state.size =
+      written > 0 ? min(static_cast<size_t>(written), sizeof(moveFeedbackStateBuffer) - 1) : 0;
+}
+
+static void setMoveResultMessage(const char *message) {
+  const int written = snprintf(moveResultMessageBuffer, sizeof(moveResultMessageBuffer), "%s", message);
+  moveResultResponse.result.message.size =
+      written > 0 ? min(static_cast<size_t>(written), sizeof(moveResultMessageBuffer) - 1) : 0;
+}
+
+static float distance3(float x, float y, float z) {
+  return sqrtf(x * x + y * y + z * z);
+}
+
+static float commandablePositionMm(float mm) {
+  return encoderCountsToMm(mmToEncoderCounts(mm));
+}
+
+static void fillMoveFeedback(const char *state) {
+  float currentX = 0.0f;
+  float currentY = 0.0f;
+  float currentZ = 0.0f;
+  getAxisPositionsMm(currentX, currentY, currentZ);
+
+  moveFeedbackMsg.feedback.current_x_mm = currentX;
+  moveFeedbackMsg.feedback.current_y_mm = currentY;
+  moveFeedbackMsg.feedback.current_z_mm = currentZ;
+  moveFeedbackMsg.feedback.error_x_mm = moveTargetX - currentX;
+  moveFeedbackMsg.feedback.error_y_mm = moveTargetY - currentY;
+  moveFeedbackMsg.feedback.error_z_mm = moveTargetZ - currentZ;
+
+  const float totalDistance = distance3(moveTargetX - moveStartX, moveTargetY - moveStartY, moveTargetZ - moveStartZ);
+  const float remainingDistance = distance3(
+      moveFeedbackMsg.feedback.error_x_mm,
+      moveFeedbackMsg.feedback.error_y_mm,
+      moveFeedbackMsg.feedback.error_z_mm);
+  if (totalDistance <= 0.001f) {
+    moveFeedbackMsg.feedback.progress = isAtXYZMm(moveTargetX, moveTargetY, moveTargetZ, moveToleranceMm) ? 1.0f : 0.0f;
+  } else {
+    moveFeedbackMsg.feedback.progress = 1.0f - (remainingDistance / totalDistance);
+    if (moveFeedbackMsg.feedback.progress < 0.0f) moveFeedbackMsg.feedback.progress = 0.0f;
+    if (moveFeedbackMsg.feedback.progress > 1.0f) moveFeedbackMsg.feedback.progress = 1.0f;
+  }
+
+  setMoveFeedbackState(state);
+}
+
+static rcl_ret_t finishMoveGoal(rcl_action_goal_state_t state, bool success, const char *message) {
+  if (!activeMoveGoal) return RCL_RET_ERROR;
+
+  float finalX = 0.0f;
+  float finalY = 0.0f;
+  float finalZ = 0.0f;
+  getAxisPositionsMm(finalX, finalY, finalZ);
+
+  moveResultResponse.status = state;
+  moveResultResponse.result.success = success;
+  moveResultResponse.result.final_x_mm = finalX;
+  moveResultResponse.result.final_y_mm = finalY;
+  moveResultResponse.result.final_z_mm = finalZ;
+  setMoveResultMessage(message);
+
+  const rcl_ret_t result = rclc_action_send_result(activeMoveGoal, state, &moveResultResponse);
+  if (result == RCL_RET_OK) {
+    activeMoveGoal = nullptr;
+    moveResultPending = false;
+  }
+  return result;
+}
+
+static void queueMoveResult(rcl_action_goal_state_t state, bool success, const char *message) {
+  moveResultPending = true;
+  movePendingResultState = state;
+  movePendingResultSuccess = success;
+  movePendingResultMessage = message;
+  finishMoveGoal(state, success, message);
 }
 
 static void stampJointState() {
@@ -87,8 +191,8 @@ static void fillTelemetryMessages() {
   for (size_t i = 0; i < 4; i++) {
     const MotorNode &motor = motors[i];
     if (motor.encoderOk) {
-      jointPositions[i] = static_cast<double>(motor.encoder) * 2.0 * M_PI / ENCODER_COUNTS_PER_REV;
       const float mm = encoderCountsToMm(motor.encoder);
+      jointPositions[i] = static_cast<double>(mm) / 1000.0;
       if (i < 2) {
         xSumMm += mm;
         xSamples++;
@@ -101,7 +205,7 @@ static void fillTelemetryMessages() {
     }
 
     jointVelocities[i] = motor.rpmOk
-                             ? static_cast<double>(motor.rpm) * 2.0 * M_PI / 60.0
+                             ? static_cast<double>(motor.rpm) * LEADSCREW_MM_PER_REV / 60000.0
                              : 0.0;
     jointEfforts[i] = 0.0;
     motorRpms[i] = motor.rpmOk ? static_cast<float>(motor.rpm) : 0.0f;
@@ -161,6 +265,50 @@ static void publishTelemetry(rcl_timer_t *, int64_t) {
   rcl_publish(&motorRpmPublisher, &motorRpmMsg, nullptr);
   rcl_publish(&statusPublisher, &statusMsg, nullptr);
   rcl_publish(&faultPublisher, &faultMsg, nullptr);
+
+  if (activeMoveGoal) {
+    if (moveResultPending) {
+      fillMoveFeedback(movePendingResultSuccess ? "result_pending" : "terminal_result_pending");
+      if (movePendingResultSuccess) moveFeedbackMsg.feedback.progress = 1.0f;
+      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      finishMoveGoal(movePendingResultState, movePendingResultSuccess, movePendingResultMessage);
+      return;
+    }
+
+    if (activeMoveGoal->goal_cancelled) {
+      stopAllMotors();
+      fillMoveFeedback("canceled");
+      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      queueMoveResult(GOAL_STATE_CANCELED, false, "goal canceled");
+      return;
+    }
+
+    if (safetyFaultIsActive()) {
+      fillMoveFeedback("fault");
+      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      queueMoveResult(GOAL_STATE_ABORTED, false, safetyFaultText());
+      return;
+    }
+
+    if (millis() - moveStartedMs > moveTimeoutMs) {
+      stopAllMotors();
+      fillMoveFeedback("timeout");
+      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      queueMoveResult(GOAL_STATE_ABORTED, false, "timeout before reaching target");
+      return;
+    }
+
+    if (isAtXYZMm(moveTargetX, moveTargetY, moveTargetZ, moveToleranceMm)) {
+      fillMoveFeedback("arrived");
+      moveFeedbackMsg.feedback.progress = 1.0f;
+      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      queueMoveResult(GOAL_STATE_SUCCEEDED, true, "target reached");
+      return;
+    }
+
+    fillMoveFeedback(axisPositionsAreValid() ? "moving" : "waiting_for_encoders");
+    rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+  }
 }
 
 static void onEmergencyStop(const void *msgIn) {
@@ -168,6 +316,50 @@ static void onEmergencyStop(const void *msgIn) {
   if (msg->data) {
     stopAllMotors();
   }
+}
+
+static rcl_ret_t onMoveGoal(rclc_action_goal_handle_t *goalHandle, void *) {
+  if (activeMoveGoal) {
+    return RCL_RET_ACTION_GOAL_REJECTED;
+  }
+
+  palletizer_msgs__action__MoveXYZ_SendGoal_Request *request =
+      reinterpret_cast<palletizer_msgs__action__MoveXYZ_SendGoal_Request *>(goalHandle->ros_goal_request);
+
+  const float requestedX = request->goal.x_mm;
+  const float requestedY = request->goal.y_mm;
+  const float requestedZ = request->goal.z_mm;
+
+  moveTargetX = commandablePositionMm(requestedX);
+  moveTargetY = commandablePositionMm(requestedY);
+  moveTargetZ = commandablePositionMm(requestedZ);
+  moveToleranceMm = request->goal.tolerance_mm > 0.0f ? request->goal.tolerance_mm : 1.0f;
+  moveTimeoutMs = request->goal.timeout_ms > 0 ? request->goal.timeout_ms : 30000;
+  moveStartedMs = millis();
+  moveResultPending = false;
+  getAxisPositionsMm(moveStartX, moveStartY, moveStartZ);
+
+  const bool commandAccepted = commandMoveXYZMm(
+      requestedX,
+      requestedY,
+      requestedZ,
+      request->goal.speed_mm_s,
+      request->goal.accel_mm_s2);
+
+  if (!commandAccepted) {
+    return RCL_RET_ACTION_GOAL_REJECTED;
+  }
+
+  activeMoveGoal = goalHandle;
+  fillMoveFeedback("accepted");
+  rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+  return RCL_RET_ACTION_GOAL_ACCEPTED;
+}
+
+static bool onMoveCancel(rclc_action_goal_handle_t *goalHandle, void *) {
+  if (goalHandle != activeMoveGoal) return false;
+  stopAllMotors();
+  return true;
 }
 
 static void initMessages() {
@@ -208,6 +400,8 @@ static void initMessages() {
 
   setString(statusMsg.data, statusBuffer, sizeof(statusBuffer));
   setString(faultMsg.data, faultBuffer, sizeof(faultBuffer));
+  setString(moveFeedbackMsg.feedback.state, moveFeedbackStateBuffer, sizeof(moveFeedbackStateBuffer));
+  setString(moveResultResponse.result.message, moveResultMessageBuffer, sizeof(moveResultMessageBuffer));
 }
 
 bool beginRosBridge() {
@@ -250,6 +444,12 @@ bool beginRosBridge() {
           &emergencyStopSubscriber, &node,
           ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
           "/palletizer/emergency_stop"))) return false;
+  if (!check(rclc_action_server_init_default(
+          &moveActionServer,
+          &node,
+          &support,
+          ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, MoveXYZ),
+          "/palletizer/move_xyz"))) return false;
 
   initMessages();
 
@@ -259,7 +459,7 @@ bool beginRosBridge() {
           RCL_MS_TO_NS(50),
           publishTelemetry))) return false;
 
-  if (!check(rclc_executor_init(&executor, &support.context, 2, &allocator))) return false;
+  if (!check(rclc_executor_init(&executor, &support.context, 3, &allocator))) return false;
   if (!check(rclc_executor_add_timer(&executor, &telemetryTimer))) return false;
   if (!check(rclc_executor_add_subscription(
           &executor,
@@ -267,6 +467,15 @@ bool beginRosBridge() {
           &emergencyStopMsg,
           onEmergencyStop,
           ON_NEW_DATA))) return false;
+  if (!check(rclc_executor_add_action_server(
+          &executor,
+          &moveActionServer,
+          1,
+          &moveGoalRequest,
+          sizeof(moveGoalRequest),
+          onMoveGoal,
+          onMoveCancel,
+          nullptr))) return false;
 
   rmw_uros_sync_session(1000);
   rosReady = true;

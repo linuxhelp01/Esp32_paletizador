@@ -40,6 +40,10 @@ bool stopAllMotors();
 bool safetyFaultIsActive();
 const char *safetyFaultText();
 bool motorIsOnline(const MotorNode &motor, uint32_t nowMs);
+bool commandMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float accelMmS2);
+void getAxisPositionsMm(float &xMm, float &yMm, float &zMm);
+bool axisPositionsAreValid();
+bool isAtXYZMm(float xMm, float yMm, float zMm, float toleranceMm);
 
 void printHelp();
 void printStatus();
