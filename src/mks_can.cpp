@@ -24,7 +24,7 @@ bool begin() {
   return true;
 }
 
-bool sendFrame(uint16_t canId, const uint8_t *payloadWithoutCrc, uint8_t lenWithoutCrc) {
+bool sendFrame(uint16_t canId, const uint8_t *payloadWithoutCrc, uint8_t lenWithoutCrc, uint32_t timeoutMs) {
   if (lenWithoutCrc > 7) return false;
 
   twai_message_t msg = {};
@@ -38,7 +38,7 @@ bool sendFrame(uint16_t canId, const uint8_t *payloadWithoutCrc, uint8_t lenWith
   }
   msg.data[lenWithoutCrc] = checksum(canId, payloadWithoutCrc, lenWithoutCrc);
 
-  return twai_transmit(&msg, pdMS_TO_TICKS(50)) == ESP_OK;
+  return twai_transmit(&msg, pdMS_TO_TICKS(timeoutMs)) == ESP_OK;
 }
 
 bool readAnyFrame(twai_message_t &rx, uint32_t timeoutMs) {

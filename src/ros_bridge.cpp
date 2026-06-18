@@ -8,6 +8,7 @@
 
 #include <micro_ros_platformio.h>
 #include <rcl/error_handling.h>
+#include <rcl/context.h>
 #include <rcl/rcl.h>
 #include <rcl_action/rcl_action.h>
 #include <rclc/action_goal_handle.h>
@@ -15,6 +16,7 @@
 #include <rclc/executor.h>
 #include <rclc/rclc.h>
 #include <rmw_microros/rmw_microros.h>
+#include <rmw_microros/timing.h>
 #include <palletizer_msgs/action/go_origin.h>
 #include <palletizer_msgs/action/home_axis.h>
 #include <palletizer_msgs/action/move_xyz.h>
@@ -109,13 +111,17 @@ static char jointNameBuffers[4][4] = {"X1", "X2", "Y", "Z"};
 
 static constexpr size_t ROS_EXECUTOR_TIMERS = 1;
 static constexpr size_t ROS_EXECUTOR_SUBSCRIPTIONS = 2;
-static constexpr size_t ROS_EXECUTOR_SERVICES = 6;
-static constexpr size_t ROS_EXECUTOR_ACTIONS = 3;
+static constexpr bool ROS_ENABLE_SERVICE_SERVERS = false;
+static constexpr size_t ROS_EXECUTOR_SERVICES = ROS_ENABLE_SERVICE_SERVERS ? 6 : 0;
+static constexpr bool ROS_ENABLE_HOME_ORIGIN_ACTIONS = false;
+static constexpr size_t ROS_EXECUTOR_ACTIONS = ROS_ENABLE_HOME_ORIGIN_ACTIONS ? 3 : 1;
+static constexpr size_t ROS_EXECUTOR_SPARES = 2;
 static constexpr size_t ROS_EXECUTOR_HANDLES =
     ROS_EXECUTOR_TIMERS +
     ROS_EXECUTOR_SUBSCRIPTIONS +
     ROS_EXECUTOR_SERVICES +
-    ROS_EXECUTOR_ACTIONS;
+    ROS_EXECUTOR_ACTIONS +
+    ROS_EXECUTOR_SPARES;
 
 static bool rosReady = false;
 static bool initOptionsInitialized = false;
@@ -1244,11 +1250,49 @@ bool beginRosBridge() {
     return false;
   }
   supportInitialized = true;
+  rmw_context_t *rmwContext = rcl_context_get_rmw_context(&support.context);
+  if (rmwContext) {
+    rmw_uros_set_context_entity_creation_session_timeout(rmwContext, MICRO_ROS_ENTITY_CREATION_TIMEOUT_MS);
+    rmw_uros_set_context_entity_destroy_session_timeout(rmwContext, MICRO_ROS_ENTITY_DESTROY_TIMEOUT_MS);
+  }
   if (!check(rclc_node_init_default(&node, "palletizer_controller", "", &support))) {
     disconnectRosBridge();
     return false;
   }
   nodeInitialized = true;
+
+  if (!check(rclc_action_server_init_default(
+          &moveActionServer,
+          &node,
+          &support,
+          ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, MoveXYZ),
+          "/palletizer/move_xyz"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  moveActionServerInitialized = true;
+  if (ROS_ENABLE_HOME_ORIGIN_ACTIONS) {
+    if (!check(rclc_action_server_init_default(
+            &homeActionServer,
+            &node,
+            &support,
+            ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, HomeAxis),
+            "/palletizer/home_axis"))) {
+      disconnectRosBridge();
+      return false;
+    }
+    homeActionServerInitialized = true;
+    if (!check(rclc_action_server_init_default(
+            &originActionServer,
+            &node,
+            &support,
+            ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, GoOrigin),
+            "/palletizer/go_origin"))) {
+      disconnectRosBridge();
+      return false;
+    }
+    originActionServerInitialized = true;
+  }
 
   if (!check(rclc_publisher_init_default(
           &jointStatePublisher, &node,
@@ -1306,84 +1350,57 @@ bool beginRosBridge() {
     return false;
   }
   commandSubscriberInitialized = true;
-  if (!check(rclc_service_init_default(
-          &enableAxisService, &node,
-          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, EnableAxis),
-          "/palletizer/enable_axis"))) {
-    disconnectRosBridge();
-    return false;
+
+  if (ROS_ENABLE_SERVICE_SERVERS) {
+    if (check(rclc_service_init_default(
+            &enableAxisService, &node,
+            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, EnableAxis),
+            "/palletizer/enable_axis"))) {
+      enableAxisServiceInitialized = true;
+    } else {
+      rcl_reset_error();
+    }
+    if (check(rclc_service_init_default(
+            &setZeroService, &node,
+            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetZero),
+            "/palletizer/set_zero"))) {
+      setZeroServiceInitialized = true;
+    } else {
+      rcl_reset_error();
+    }
+    if (check(rclc_service_init_default(
+            &setAxisLimitsService, &node,
+            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetAxisLimits),
+            "/palletizer/set_axis_limits"))) {
+      setAxisLimitsServiceInitialized = true;
+    } else {
+      rcl_reset_error();
+    }
+    if (check(rclc_service_init_default(
+            &clearFaultService, &node,
+            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ClearFault),
+            "/palletizer/clear_fault"))) {
+      clearFaultServiceInitialized = true;
+    } else {
+      rcl_reset_error();
+    }
+    if (check(rclc_service_init_default(
+            &releaseStallService, &node,
+            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ReleaseStall),
+            "/palletizer/release_stall"))) {
+      releaseStallServiceInitialized = true;
+    } else {
+      rcl_reset_error();
+    }
+    if (check(rclc_service_init_default(
+            &getDriverStatusService, &node,
+            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, GetDriverStatus),
+            "/palletizer/get_driver_status"))) {
+      getDriverStatusServiceInitialized = true;
+    } else {
+      rcl_reset_error();
+    }
   }
-  enableAxisServiceInitialized = true;
-  if (!check(rclc_service_init_default(
-          &setZeroService, &node,
-          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetZero),
-          "/palletizer/set_zero"))) {
-    disconnectRosBridge();
-    return false;
-  }
-  setZeroServiceInitialized = true;
-  if (!check(rclc_service_init_default(
-          &setAxisLimitsService, &node,
-          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetAxisLimits),
-          "/palletizer/set_axis_limits"))) {
-    disconnectRosBridge();
-    return false;
-  }
-  setAxisLimitsServiceInitialized = true;
-  if (!check(rclc_service_init_default(
-          &clearFaultService, &node,
-          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ClearFault),
-          "/palletizer/clear_fault"))) {
-    disconnectRosBridge();
-    return false;
-  }
-  clearFaultServiceInitialized = true;
-  if (!check(rclc_service_init_default(
-          &releaseStallService, &node,
-          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ReleaseStall),
-          "/palletizer/release_stall"))) {
-    disconnectRosBridge();
-    return false;
-  }
-  releaseStallServiceInitialized = true;
-  if (!check(rclc_service_init_default(
-          &getDriverStatusService, &node,
-          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, GetDriverStatus),
-          "/palletizer/get_driver_status"))) {
-    disconnectRosBridge();
-    return false;
-  }
-  getDriverStatusServiceInitialized = true;
-  if (!check(rclc_action_server_init_default(
-          &moveActionServer,
-          &node,
-          &support,
-          ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, MoveXYZ),
-          "/palletizer/move_xyz"))) {
-    disconnectRosBridge();
-    return false;
-  }
-  moveActionServerInitialized = true;
-  if (!check(rclc_action_server_init_default(
-          &homeActionServer,
-          &node,
-          &support,
-          ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, HomeAxis),
-          "/palletizer/home_axis"))) {
-    disconnectRosBridge();
-    return false;
-  }
-  homeActionServerInitialized = true;
-  if (!check(rclc_action_server_init_default(
-          &originActionServer,
-          &node,
-          &support,
-          ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, GoOrigin),
-          "/palletizer/go_origin"))) {
-    disconnectRosBridge();
-    return false;
-  }
-  originActionServerInitialized = true;
 
   initMessages();
 
@@ -1424,60 +1441,6 @@ bool beginRosBridge() {
     disconnectRosBridge();
     return false;
   }
-  if (!check(rclc_executor_add_service(
-          &executor,
-          &enableAxisService,
-          &enableAxisRequest,
-          &enableAxisResponse,
-          onEnableAxisService))) {
-    disconnectRosBridge();
-    return false;
-  }
-  if (!check(rclc_executor_add_service(
-          &executor,
-          &setZeroService,
-          &setZeroRequest,
-          &setZeroResponse,
-          onSetZeroService))) {
-    disconnectRosBridge();
-    return false;
-  }
-  if (!check(rclc_executor_add_service(
-          &executor,
-          &setAxisLimitsService,
-          &setAxisLimitsRequest,
-          &setAxisLimitsResponse,
-          onSetAxisLimitsService))) {
-    disconnectRosBridge();
-    return false;
-  }
-  if (!check(rclc_executor_add_service(
-          &executor,
-          &clearFaultService,
-          &clearFaultRequest,
-          &clearFaultResponse,
-          onClearFaultService))) {
-    disconnectRosBridge();
-    return false;
-  }
-  if (!check(rclc_executor_add_service(
-          &executor,
-          &releaseStallService,
-          &releaseStallRequest,
-          &releaseStallResponse,
-          onReleaseStallService))) {
-    disconnectRosBridge();
-    return false;
-  }
-  if (!check(rclc_executor_add_service(
-          &executor,
-          &getDriverStatusService,
-          &getDriverStatusRequest,
-          &getDriverStatusResponse,
-          onGetDriverStatusService))) {
-    disconnectRosBridge();
-    return false;
-  }
   if (!check(rclc_executor_add_action_server(
           &executor,
           &moveActionServer,
@@ -1490,27 +1453,90 @@ bool beginRosBridge() {
     disconnectRosBridge();
     return false;
   }
-  if (!check(rclc_executor_add_action_server(
+  if (ROS_ENABLE_HOME_ORIGIN_ACTIONS) {
+    if (!check(rclc_executor_add_action_server(
+            &executor,
+            &homeActionServer,
+            1,
+            &homeGoalRequest,
+            sizeof(homeGoalRequest),
+            onHomeGoal,
+            onHomeCancel,
+            nullptr))) {
+      disconnectRosBridge();
+      return false;
+    }
+    if (!check(rclc_executor_add_action_server(
+            &executor,
+            &originActionServer,
+            1,
+            &originGoalRequest,
+            sizeof(originGoalRequest),
+            onOriginGoal,
+            onOriginCancel,
+            nullptr))) {
+      disconnectRosBridge();
+      return false;
+    }
+  }
+
+  if (ROS_ENABLE_SERVICE_SERVERS && enableAxisServiceInitialized &&
+      !check(rclc_executor_add_service(
           &executor,
-          &homeActionServer,
-          1,
-          &homeGoalRequest,
-          sizeof(homeGoalRequest),
-          onHomeGoal,
-          onHomeCancel,
-          nullptr))) {
+          &enableAxisService,
+          &enableAxisRequest,
+          &enableAxisResponse,
+          onEnableAxisService))) {
     disconnectRosBridge();
     return false;
   }
-  if (!check(rclc_executor_add_action_server(
+  if (ROS_ENABLE_SERVICE_SERVERS && setZeroServiceInitialized &&
+      !check(rclc_executor_add_service(
           &executor,
-          &originActionServer,
-          1,
-          &originGoalRequest,
-          sizeof(originGoalRequest),
-          onOriginGoal,
-          onOriginCancel,
-          nullptr))) {
+          &setZeroService,
+          &setZeroRequest,
+          &setZeroResponse,
+          onSetZeroService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (ROS_ENABLE_SERVICE_SERVERS && setAxisLimitsServiceInitialized &&
+      !check(rclc_executor_add_service(
+          &executor,
+          &setAxisLimitsService,
+          &setAxisLimitsRequest,
+          &setAxisLimitsResponse,
+          onSetAxisLimitsService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (ROS_ENABLE_SERVICE_SERVERS && clearFaultServiceInitialized &&
+      !check(rclc_executor_add_service(
+          &executor,
+          &clearFaultService,
+          &clearFaultRequest,
+          &clearFaultResponse,
+          onClearFaultService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (ROS_ENABLE_SERVICE_SERVERS && releaseStallServiceInitialized &&
+      !check(rclc_executor_add_service(
+          &executor,
+          &releaseStallService,
+          &releaseStallRequest,
+          &releaseStallResponse,
+          onReleaseStallService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (ROS_ENABLE_SERVICE_SERVERS && getDriverStatusServiceInitialized &&
+      !check(rclc_executor_add_service(
+          &executor,
+          &getDriverStatusService,
+          &getDriverStatusRequest,
+          &getDriverStatusResponse,
+          onGetDriverStatusService))) {
     disconnectRosBridge();
     return false;
   }

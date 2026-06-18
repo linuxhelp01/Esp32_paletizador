@@ -31,7 +31,7 @@ static constexpr uint8_t DIR_NEGATIVE = 0x80;
 
 uint8_t checksum(uint16_t canId, const uint8_t *data, uint8_t len);
 bool begin();
-bool sendFrame(uint16_t canId, const uint8_t *payloadWithoutCrc, uint8_t lenWithoutCrc);
+bool sendFrame(uint16_t canId, const uint8_t *payloadWithoutCrc, uint8_t lenWithoutCrc, uint32_t timeoutMs = 50);
 bool readAnyFrame(twai_message_t &rx, uint32_t timeoutMs = 0);
 bool verifyChecksum(const twai_message_t &msg);
 bool waitTxIdle(uint32_t timeoutMs);

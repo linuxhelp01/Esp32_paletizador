@@ -186,6 +186,10 @@ static bool sendDriverCommand(uint16_t canId, const uint8_t *cmd, uint8_t len) {
   return false;
 }
 
+static bool sendTelemetryRequest(uint16_t canId, const uint8_t *cmd, uint8_t len) {
+  return mks::sendFrame(canId, cmd, len, CAN_TELEMETRY_TX_TIMEOUT_MS);
+}
+
 static int8_t signOfDelta(int64_t value) {
   if (value > 0) return 1;
   if (value < 0) return -1;
@@ -491,6 +495,12 @@ bool motorIsOnline(const MotorNode &motor, uint32_t nowMs) {
   return motor.lastSeenMs > 0 && (nowMs - motor.lastSeenMs) <= MOTOR_ONLINE_TIMEOUT_MS;
 }
 
+static bool encoderSampleIsFresh(const MotorNode &motor, uint32_t nowMs) {
+  return motor.encoderOk &&
+         motor.lastEncoderUpdateMs > 0 &&
+         (nowMs - motor.lastEncoderUpdateMs) <= POSITION_SAMPLE_MAX_AGE_MS;
+}
+
 void getAxisPositionsMm(float &xMm, float &yMm, float &zMm) {
   float xSumMm = 0.0f;
   uint8_t xSamples = 0;
@@ -510,7 +520,11 @@ void getAxisPositionsMm(float &xMm, float &yMm, float &zMm) {
 }
 
 bool axisPositionsAreValid() {
-  return motors[0].encoderOk && motors[1].encoderOk && motors[2].encoderOk && motors[3].encoderOk;
+  const uint32_t now = millis();
+  return encoderSampleIsFresh(motors[0], now) &&
+         encoderSampleIsFresh(motors[1], now) &&
+         encoderSampleIsFresh(motors[2], now) &&
+         encoderSampleIsFresh(motors[3], now);
 }
 
 bool isAtXYZMm(float xMm, float yMm, float zMm, float toleranceMm) {
@@ -833,37 +847,37 @@ bool commandMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float acc
 
 static bool requestEncoder(const MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_READ_ENCODER};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendTelemetryRequest(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool requestSpeed(const MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_READ_SPEED_RPM};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendTelemetryRequest(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool requestRawEncoder(const MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_READ_RAW_ENCODER};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendTelemetryRequest(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool requestAngleError(const MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_READ_ANGLE_ERROR};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendTelemetryRequest(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool requestEnableStatus(const MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_READ_ENABLE};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendTelemetryRequest(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool requestHomeStatus(const MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_READ_HOME_STATUS};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendTelemetryRequest(motor.canId, cmd, sizeof(cmd));
 }
 
 static bool requestStallStatus(const MotorNode &motor) {
   const uint8_t cmd[] = {mks::CMD_READ_STALL};
-  return mks::sendFrame(motor.canId, cmd, sizeof(cmd));
+  return sendTelemetryRequest(motor.canId, cmd, sizeof(cmd));
 }
 
 static void handleEncoderReply(MotorNode &motor, const twai_message_t &msg) {
@@ -1032,8 +1046,10 @@ void pollEncoders() {
 
   if (now - lastEncoderPollMs >= ENCODER_POLL_MS) {
     lastEncoderPollMs = now;
-    requestEncoder(motors[nextEncoderPollMotor]);
-    nextEncoderPollMotor = (nextEncoderPollMotor + 1) % 4;
+    for (uint8_t i = 0; i < ENCODER_REQUESTS_PER_POLL; i++) {
+      requestEncoder(motors[nextEncoderPollMotor]);
+      nextEncoderPollMotor = (nextEncoderPollMotor + 1) % 4;
+    }
   }
 
   if (now - lastSpeedPollMs >= SPEED_POLL_MS) {
