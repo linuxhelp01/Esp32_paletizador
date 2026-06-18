@@ -8,6 +8,14 @@ find_package(builtin_interfaces REQUIRED)
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   "action/MoveXYZ.action"
+  "action/HomeAxis.action"
+  "action/GoOrigin.action"
+  "srv/EnableAxis.srv"
+  "srv/SetZero.srv"
+  "srv/SetAxisLimits.srv"
+  "srv/ClearFault.srv"
+  "srv/ReleaseStall.srv"
+  "srv/GetDriverStatus.srv"
   DEPENDENCIES action_msgs builtin_interfaces
 )
 

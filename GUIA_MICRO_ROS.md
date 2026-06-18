@@ -168,7 +168,7 @@ ros2 action list -t
 
 El valor de `ROS_DOMAIN_ID` debe ser `10` en todas las terminales que usen ROS.
 
-## 4. Ver nodos, topicos y action
+## 4. Ver nodos, topicos, services y actions
 
 En otra terminal:
 
@@ -212,17 +212,32 @@ Subscriber esperado:
 /palletizer/command
 ```
 
-Action esperada:
+Services esperados:
+
+```bash
+/palletizer/enable_axis [palletizer_msgs/srv/EnableAxis]
+/palletizer/set_zero [palletizer_msgs/srv/SetZero]
+/palletizer/set_axis_limits [palletizer_msgs/srv/SetAxisLimits]
+/palletizer/clear_fault [palletizer_msgs/srv/ClearFault]
+/palletizer/release_stall [palletizer_msgs/srv/ReleaseStall]
+/palletizer/get_driver_status [palletizer_msgs/srv/GetDriverStatus]
+```
+
+Actions esperadas:
 
 ```bash
 /palletizer/move_xyz [palletizer_msgs/action/MoveXYZ]
+/palletizer/home_axis [palletizer_msgs/action/HomeAxis]
+/palletizer/go_origin [palletizer_msgs/action/GoOrigin]
 ```
 
-Ver action:
+Ver actions:
 
 ```bash
 ros2 action list -t
 ros2 action info /palletizer/move_xyz
+ros2 action info /palletizer/home_axis
+ros2 action info /palletizer/go_origin
 ```
 
 Los servicios y topicos internos de una action son ocultos. Para verlos:
@@ -286,52 +301,82 @@ Enviar parada:
 ros2 topic pub --once /palletizer/emergency_stop std_msgs/msg/Bool "{data: true}"
 ```
 
-## 7. Comandos de driver y homing
+## 7. Services de configuracion y estado
 
-Los comandos auxiliares se envian como texto por:
+Convencion de ejes en los services/actions:
 
-```bash
-/palletizer/command [std_msgs/msg/String]
+```text
+0 = X
+1 = Y
+2 = Z
+3 = ALL
 ```
 
 Habilitar motores:
 
 ```bash
-ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'ENABLE ALL'}"
+ros2 service call /palletizer/enable_axis palletizer_msgs/srv/EnableAxis "{axis: 3, enable: true}"
 ```
 
 Deshabilitar un eje:
 
 ```bash
-ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'DISABLE Z'}"
-```
-
-Homing de origen con doble pasada, usando `0x91 0x00`. El ejemplo configura
-limites de software para el eje X entre `-5 mm` y `300 mm`:
-
-```bash
-ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'HOME X -5 300'}"
-```
-
-Tambien se puede indicar velocidad rapida y lenta en RPM:
-
-```bash
-ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'HOME Z 0 250 300 80'}"
-```
-
-Volver al origen de coordenadas ya conocido con `0x91 0x01`:
-
-```bash
-ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'ORIGIN X'}"
+ros2 service call /palletizer/enable_axis palletizer_msgs/srv/EnableAxis "{axis: 2, enable: false}"
 ```
 
 Setear cero actual con `0x92` y limites de software:
 
 ```bash
-ros2 topic pub --once /palletizer/command std_msgs/msg/String "{data: 'ZERO Y -10 250'}"
+ros2 service call /palletizer/set_zero palletizer_msgs/srv/SetZero "{axis: 1, min_mm: -10.0, max_mm: 250.0}"
 ```
 
-Durante homing revisa:
+Cambiar solo limites de software:
+
+```bash
+ros2 service call /palletizer/set_axis_limits palletizer_msgs/srv/SetAxisLimits "{axis: 0, min_mm: -5.0, max_mm: 300.0}"
+```
+
+Leer estado estructurado de drivers:
+
+```bash
+ros2 service call /palletizer/get_driver_status palletizer_msgs/srv/GetDriverStatus "{}"
+```
+
+Liberar falla local del firmware:
+
+```bash
+ros2 service call /palletizer/clear_fault palletizer_msgs/srv/ClearFault "{}"
+```
+
+Liberar stall del driver con `0x3D`:
+
+```bash
+ros2 service call /palletizer/release_stall palletizer_msgs/srv/ReleaseStall "{axis: 3}"
+```
+
+`/palletizer/command [std_msgs/msg/String]` sigue disponible como consola de
+debug, pero la interfaz recomendada para operacion es usar services/actions.
+
+## 8. Homing e ir a origen por action
+
+Homing de origen con doble pasada, usando `0x91 0x00`. El ejemplo configura
+limites de software para el eje X entre `-5 mm` y `300 mm`:
+
+```bash
+ros2 action send_goal /palletizer/home_axis palletizer_msgs/action/HomeAxis \
+"{axis: 0, set_limits: true, min_mm: -5.0, max_mm: 300.0, fast_rpm: 300.0, slow_rpm: 80.0, timeout_ms: 120000}" \
+--feedback
+```
+
+Volver al origen de coordenadas ya conocido con `0x91 0x01`:
+
+```bash
+ros2 action send_goal /palletizer/go_origin palletizer_msgs/action/GoOrigin \
+"{axis: 0, tolerance_mm: 1.0, timeout_ms: 30000}" \
+--feedback
+```
+
+Durante homing/origen revisa:
 
 ```bash
 ros2 topic echo /palletizer/status
@@ -340,7 +385,7 @@ ros2 topic echo /palletizer/status
 El estado publica `homing`, `home91`, `home3B`, `enabled`, `stalled`,
 `enc31`, `raw35`, `angleError` y los limites por eje.
 
-## 8. Enviar setpoint por action
+## 9. Enviar setpoint por action
 
 El action disponible es:
 
@@ -397,7 +442,7 @@ final_y_mm
 final_z_mm
 ```
 
-## 9. Problemas comunes
+## 10. Problemas comunes
 
 ### `The passed action type is invalid`
 
@@ -446,7 +491,7 @@ para ejes prismaticos esta en metros. Para comparar en milimetros usa:
 ros2 topic echo /palletizer/axis_position_mm
 ```
 
-## 10. Compilar y cargar firmware
+## 11. Compilar y cargar firmware
 
 Compilar:
 

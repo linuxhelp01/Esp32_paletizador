@@ -11,6 +11,13 @@ enum class RobotCommandType : uint8_t {
   MOVE_XYZ,
   STOP,
   TEXT,
+  HOME_AXIS,
+  GO_ORIGIN,
+  SET_ZERO,
+  SET_AXIS_LIMITS,
+  SET_AXIS_ENABLE,
+  CLEAR_FAULT,
+  RELEASE_STALL,
 };
 
 struct RobotCommand {
@@ -21,6 +28,12 @@ struct RobotCommand {
   float zMm = 0.0f;
   float speedMmS = 0.0f;
   float accelMmS2 = 0.0f;
+  uint8_t axis = 0;
+  bool flag = false;
+  float minMm = 0.0f;
+  float maxMm = 0.0f;
+  uint16_t fastRpm = 0;
+  uint16_t slowRpm = 0;
   char text[128] = "";
 };
 
@@ -36,6 +49,32 @@ static uint32_t nextCommandId = 1;
 static uint32_t lastMoveCommandId = 0;
 static bool lastMoveCommandKnown = false;
 static bool lastMoveCommandAccepted = false;
+static uint32_t lastControlCommandId = 0;
+static bool lastControlCommandKnown = false;
+static bool lastControlCommandAccepted = false;
+
+static Axis axisFromCommand(uint8_t axis) {
+  switch (axis) {
+    case 0:
+      return Axis::X;
+    case 1:
+      return Axis::Y;
+    case 2:
+      return Axis::Z;
+    case 3:
+      return Axis::ALL;
+    default:
+      return Axis::UNKNOWN;
+  }
+}
+
+static uint32_t allocateCommandId() {
+  portENTER_CRITICAL(&commandStatusMux);
+  const uint32_t commandId = nextCommandId++;
+  if (nextCommandId == 0) nextCommandId = 1;
+  portEXIT_CRITICAL(&commandStatusMux);
+  return commandId;
+}
 
 static void setMoveCommandPending(uint32_t commandId) {
   portENTER_CRITICAL(&commandStatusMux);
@@ -50,6 +89,22 @@ static void setMoveCommandStatus(uint32_t commandId, bool accepted) {
   lastMoveCommandId = commandId;
   lastMoveCommandKnown = true;
   lastMoveCommandAccepted = accepted;
+  portEXIT_CRITICAL(&commandStatusMux);
+}
+
+static void setControlCommandPending(uint32_t commandId) {
+  portENTER_CRITICAL(&commandStatusMux);
+  lastControlCommandId = commandId;
+  lastControlCommandKnown = false;
+  lastControlCommandAccepted = false;
+  portEXIT_CRITICAL(&commandStatusMux);
+}
+
+static void setControlCommandStatus(uint32_t commandId, bool accepted) {
+  portENTER_CRITICAL(&commandStatusMux);
+  lastControlCommandId = commandId;
+  lastControlCommandKnown = true;
+  lastControlCommandAccepted = accepted;
   portEXIT_CRITICAL(&commandStatusMux);
 }
 
@@ -130,6 +185,39 @@ static void processRobotCommand(const RobotCommand &command) {
       break;
     case RobotCommandType::TEXT:
       handleMachineCommand(String(command.text));
+      break;
+    case RobotCommandType::HOME_AXIS:
+      setControlCommandStatus(
+          command.id,
+          startHomeAxis(
+              axisFromCommand(command.axis),
+              command.flag,
+              command.minMm,
+              command.maxMm,
+              command.fastRpm,
+              command.slowRpm));
+      break;
+    case RobotCommandType::GO_ORIGIN:
+      setControlCommandStatus(command.id, commandGoOriginAxis(axisFromCommand(command.axis)));
+      break;
+    case RobotCommandType::SET_ZERO:
+      setControlCommandStatus(
+          command.id,
+          commandSetZeroAxis(axisFromCommand(command.axis), true, command.minMm, command.maxMm));
+      break;
+    case RobotCommandType::SET_AXIS_LIMITS:
+      setControlCommandStatus(
+          command.id,
+          commandSetAxisLimits(axisFromCommand(command.axis), command.minMm, command.maxMm));
+      break;
+    case RobotCommandType::SET_AXIS_ENABLE:
+      setControlCommandStatus(command.id, commandSetAxisEnable(axisFromCommand(command.axis), command.flag));
+      break;
+    case RobotCommandType::CLEAR_FAULT:
+      setControlCommandStatus(command.id, commandClearSafetyFault());
+      break;
+    case RobotCommandType::RELEASE_STALL:
+      setControlCommandStatus(command.id, commandReleaseStallAxis(axisFromCommand(command.axis)));
       break;
   }
 }
@@ -221,10 +309,7 @@ bool robotRequestMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, floa
   command.speedMmS = speedMmS;
   command.accelMmS2 = accelMmS2;
 
-  portENTER_CRITICAL(&commandStatusMux);
-  command.id = nextCommandId++;
-  if (nextCommandId == 0) nextCommandId = 1;
-  portEXIT_CRITICAL(&commandStatusMux);
+  command.id = allocateCommandId();
 
   if (xQueueSend(robotCommandQueue, &command, 0) != pdTRUE) return false;
 
@@ -233,11 +318,89 @@ bool robotRequestMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, floa
   return true;
 }
 
+static bool enqueueControlCommand(RobotCommand &command, uint32_t &commandId) {
+  if (!robotCommandQueue) return false;
+
+  command.id = allocateCommandId();
+  if (xQueueSend(robotCommandQueue, &command, 0) != pdTRUE) return false;
+
+  commandId = command.id;
+  setControlCommandPending(command.id);
+  return true;
+}
+
 bool robotGetMoveCommandStatus(uint32_t commandId, bool &known, bool &accepted) {
   portENTER_CRITICAL(&commandStatusMux);
   const bool matches = lastMoveCommandId == commandId;
   known = matches && lastMoveCommandKnown;
   accepted = known && lastMoveCommandAccepted;
+  portEXIT_CRITICAL(&commandStatusMux);
+  return matches;
+}
+
+bool robotRequestHomeAxis(uint8_t axis, bool setLimits, float minMm, float maxMm, uint16_t fastRpm, uint16_t slowRpm, uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::HOME_AXIS;
+  command.axis = axis;
+  command.flag = setLimits;
+  command.minMm = minMm;
+  command.maxMm = maxMm;
+  command.fastRpm = fastRpm;
+  command.slowRpm = slowRpm;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotRequestGoOrigin(uint8_t axis, uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::GO_ORIGIN;
+  command.axis = axis;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotRequestSetZero(uint8_t axis, float minMm, float maxMm, uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::SET_ZERO;
+  command.axis = axis;
+  command.minMm = minMm;
+  command.maxMm = maxMm;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotRequestSetAxisLimits(uint8_t axis, float minMm, float maxMm, uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::SET_AXIS_LIMITS;
+  command.axis = axis;
+  command.minMm = minMm;
+  command.maxMm = maxMm;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotRequestSetAxisEnable(uint8_t axis, bool enable, uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::SET_AXIS_ENABLE;
+  command.axis = axis;
+  command.flag = enable;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotRequestClearFault(uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::CLEAR_FAULT;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotRequestReleaseStall(uint8_t axis, uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::RELEASE_STALL;
+  command.axis = axis;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotGetControlCommandStatus(uint32_t commandId, bool &known, bool &accepted) {
+  portENTER_CRITICAL(&commandStatusMux);
+  const bool matches = lastControlCommandId == commandId;
+  known = matches && lastControlCommandKnown;
+  accepted = known && lastControlCommandAccepted;
   portEXIT_CRITICAL(&commandStatusMux);
   return matches;
 }

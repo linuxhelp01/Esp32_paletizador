@@ -469,6 +469,11 @@ static bool commandStopAll() {
 }
 
 bool stopAllMotors() {
+  if (homing.active) {
+    homing.active = false;
+    homing.phase = HomingPhase::FAILED;
+    snprintf(homing.stateText, sizeof(homing.stateText), "aborted:stop");
+  }
   xPairMotionMonitoringActive = false;
   xPairExpectedDirection = 0;
   return commandStopAll();
@@ -569,6 +574,13 @@ static bool commandSetEnable(MotorNode &motor, bool enable) {
     motor.enableCommandStatus = 0;
     motor.enabledOk = false;
   }
+  return ok;
+}
+
+static bool commandReleaseStall(MotorNode &motor) {
+  const uint8_t cmd[] = {mks::CMD_RELEASE_STALL};
+  const bool ok = sendDriverCommand(motor.canId, cmd, sizeof(cmd));
+  if (ok) motor.stallOk = false;
   return ok;
 }
 
@@ -703,6 +715,11 @@ bool commandSetZeroAxis(Axis axis, bool configureLimits, float minMm, float maxM
   });
 }
 
+bool commandSetAxisLimits(Axis axis, float minMm, float maxMm) {
+  if (axis == Axis::ALL || axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) return false;
+  return setAxisLimits(axis, minMm, maxMm);
+}
+
 bool commandSetAxisEnable(Axis axis, bool enable) {
   if (axis == Axis::UNKNOWN) return false;
   if (enable && safetyFaultActive) return false;
@@ -716,6 +733,17 @@ bool commandSetAxisEnable(Axis axis, bool enable) {
   }
   return forEachMotorInAxis(axis, [enable](MotorNode &motor) {
     return commandSetEnable(motor, enable);
+  });
+}
+
+bool commandClearSafetyFault() {
+  return resetSafetyFault();
+}
+
+bool commandReleaseStallAxis(Axis axis) {
+  if (axis == Axis::UNKNOWN) return false;
+  return forEachMotorInAxis(axis, [](MotorNode &motor) {
+    return commandReleaseStall(motor);
   });
 }
 

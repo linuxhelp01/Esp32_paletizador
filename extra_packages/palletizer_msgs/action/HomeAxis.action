@@ -1,0 +1,21 @@
+uint8 AXIS_X=0
+uint8 AXIS_Y=1
+uint8 AXIS_Z=2
+uint8 AXIS_ALL=3
+
+uint8 axis
+bool set_limits
+float32 min_mm
+float32 max_mm
+float32 fast_rpm
+float32 slow_rpm
+uint32 timeout_ms
+---
+bool success
+string message
+float32 final_position_mm
+---
+uint8 axis
+float32 current_position_mm
+float32 progress
+string state

@@ -61,7 +61,10 @@ bool commandMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float acc
 bool startHomeAxis(Axis axis, bool configureLimits, float minMm, float maxMm, uint16_t fastRpm, uint16_t slowRpm);
 bool commandGoOriginAxis(Axis axis);
 bool commandSetZeroAxis(Axis axis, bool configureLimits, float minMm, float maxMm);
+bool commandSetAxisLimits(Axis axis, float minMm, float maxMm);
 bool commandSetAxisEnable(Axis axis, bool enable);
+bool commandClearSafetyFault();
+bool commandReleaseStallAxis(Axis axis);
 bool axisLimitsAreConfigured(Axis axis);
 bool getAxisLimits(Axis axis, float &minMm, float &maxMm);
 bool homingIsActive();

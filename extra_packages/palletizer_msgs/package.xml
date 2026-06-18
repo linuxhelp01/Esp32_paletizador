@@ -2,7 +2,7 @@
 <package format="3">
   <name>palletizer_msgs</name>
   <version>0.0.1</version>
-  <description>Action interfaces for the ESP32 palletizer controller.</description>
+  <description>ROS interfaces for the ESP32 palletizer controller.</description>
   <maintainer email="felipe@example.com">felipe</maintainer>
   <license>Apache-2.0</license>
 

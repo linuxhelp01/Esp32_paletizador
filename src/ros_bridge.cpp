@@ -15,7 +15,15 @@
 #include <rclc/executor.h>
 #include <rclc/rclc.h>
 #include <rmw_microros/rmw_microros.h>
+#include <palletizer_msgs/action/go_origin.h>
+#include <palletizer_msgs/action/home_axis.h>
 #include <palletizer_msgs/action/move_xyz.h>
+#include <palletizer_msgs/srv/clear_fault.h>
+#include <palletizer_msgs/srv/enable_axis.h>
+#include <palletizer_msgs/srv/get_driver_status.h>
+#include <palletizer_msgs/srv/release_stall.h>
+#include <palletizer_msgs/srv/set_axis_limits.h>
+#include <palletizer_msgs/srv/set_zero.h>
 #include <sensor_msgs/msg/joint_state.h>
 #include <std_msgs/msg/bool.h>
 #include <std_msgs/msg/float32_multi_array.h>
@@ -38,7 +46,15 @@ static rcl_publisher_t statusPublisher;
 static rcl_publisher_t faultPublisher;
 static rcl_subscription_t emergencyStopSubscriber;
 static rcl_subscription_t commandSubscriber;
+static rcl_service_t enableAxisService;
+static rcl_service_t setZeroService;
+static rcl_service_t setAxisLimitsService;
+static rcl_service_t clearFaultService;
+static rcl_service_t releaseStallService;
+static rcl_service_t getDriverStatusService;
 static rclc_action_server_t moveActionServer;
+static rclc_action_server_t homeActionServer;
+static rclc_action_server_t originActionServer;
 
 static sensor_msgs__msg__JointState jointStateMsg;
 static std_msgs__msg__Float32MultiArray axisPositionMsg;
@@ -47,9 +63,27 @@ static std_msgs__msg__String statusMsg;
 static std_msgs__msg__String faultMsg;
 static std_msgs__msg__Bool emergencyStopMsg;
 static std_msgs__msg__String commandMsg;
+static palletizer_msgs__srv__EnableAxis_Request enableAxisRequest;
+static palletizer_msgs__srv__EnableAxis_Response enableAxisResponse;
+static palletizer_msgs__srv__SetZero_Request setZeroRequest;
+static palletizer_msgs__srv__SetZero_Response setZeroResponse;
+static palletizer_msgs__srv__SetAxisLimits_Request setAxisLimitsRequest;
+static palletizer_msgs__srv__SetAxisLimits_Response setAxisLimitsResponse;
+static palletizer_msgs__srv__ClearFault_Request clearFaultRequest;
+static palletizer_msgs__srv__ClearFault_Response clearFaultResponse;
+static palletizer_msgs__srv__ReleaseStall_Request releaseStallRequest;
+static palletizer_msgs__srv__ReleaseStall_Response releaseStallResponse;
+static palletizer_msgs__srv__GetDriverStatus_Request getDriverStatusRequest;
+static palletizer_msgs__srv__GetDriverStatus_Response getDriverStatusResponse;
 static palletizer_msgs__action__MoveXYZ_SendGoal_Request moveGoalRequest;
 static palletizer_msgs__action__MoveXYZ_FeedbackMessage moveFeedbackMsg;
 static palletizer_msgs__action__MoveXYZ_GetResult_Response moveResultResponse;
+static palletizer_msgs__action__HomeAxis_SendGoal_Request homeGoalRequest;
+static palletizer_msgs__action__HomeAxis_FeedbackMessage homeFeedbackMsg;
+static palletizer_msgs__action__HomeAxis_GetResult_Response homeResultResponse;
+static palletizer_msgs__action__GoOrigin_SendGoal_Request originGoalRequest;
+static palletizer_msgs__action__GoOrigin_FeedbackMessage originFeedbackMsg;
+static palletizer_msgs__action__GoOrigin_GetResult_Response originResultResponse;
 
 static rosidl_runtime_c__String jointNames[4];
 static double jointPositions[4];
@@ -60,10 +94,28 @@ static float motorRpms[4];
 static char statusBuffer[1536];
 static char faultBuffer[96];
 static char commandBuffer[128];
+static char serviceMessageBuffers[6][96];
+static char driverStatusMessageBuffer[96];
+static char driverStatusSafetyReasonBuffer[96];
+static char driverStatusHomingStateBuffer[48];
 static char moveFeedbackStateBuffer[96];
 static char moveResultMessageBuffer[96];
+static char homeFeedbackStateBuffer[96];
+static char homeResultMessageBuffer[96];
+static char originFeedbackStateBuffer[96];
+static char originResultMessageBuffer[96];
 static char frameIdBuffer[] = "palletizer_base";
 static char jointNameBuffers[4][4] = {"X1", "X2", "Y", "Z"};
+
+static constexpr size_t ROS_EXECUTOR_TIMERS = 1;
+static constexpr size_t ROS_EXECUTOR_SUBSCRIPTIONS = 2;
+static constexpr size_t ROS_EXECUTOR_SERVICES = 6;
+static constexpr size_t ROS_EXECUTOR_ACTIONS = 3;
+static constexpr size_t ROS_EXECUTOR_HANDLES =
+    ROS_EXECUTOR_TIMERS +
+    ROS_EXECUTOR_SUBSCRIPTIONS +
+    ROS_EXECUTOR_SERVICES +
+    ROS_EXECUTOR_ACTIONS;
 
 static bool rosReady = false;
 static bool initOptionsInitialized = false;
@@ -78,7 +130,15 @@ static bool statusPublisherInitialized = false;
 static bool faultPublisherInitialized = false;
 static bool emergencyStopSubscriberInitialized = false;
 static bool commandSubscriberInitialized = false;
+static bool enableAxisServiceInitialized = false;
+static bool setZeroServiceInitialized = false;
+static bool setAxisLimitsServiceInitialized = false;
+static bool clearFaultServiceInitialized = false;
+static bool releaseStallServiceInitialized = false;
+static bool getDriverStatusServiceInitialized = false;
 static bool moveActionServerInitialized = false;
+static bool homeActionServerInitialized = false;
+static bool originActionServerInitialized = false;
 static uint32_t lastRosReconnectAttemptMs = 0;
 static uint32_t lastRosHealthCheckMs = 0;
 static rclc_action_goal_handle_t *activeMoveGoal = nullptr;
@@ -95,9 +155,32 @@ static uint32_t movePositionStableSinceMs = 0;
 static bool moveResultPending = false;
 static rcl_action_goal_state_t movePendingResultState = GOAL_STATE_UNKNOWN;
 static bool movePendingResultSuccess = false;
-static const char *movePendingResultMessage = "";
+static char movePendingResultMessage[96] = "";
 static uint32_t moveControlCommandId = 0;
 static bool moveControlCommandAccepted = false;
+static rclc_action_goal_handle_t *activeHomeGoal = nullptr;
+static uint8_t homeAxis = 0;
+static uint32_t homeStartedMs = 0;
+static uint32_t homeTimeoutMs = 60000;
+static uint32_t homeControlCommandId = 0;
+static bool homeControlCommandAccepted = false;
+static bool homeResultPending = false;
+static rcl_action_goal_state_t homePendingResultState = GOAL_STATE_UNKNOWN;
+static bool homePendingResultSuccess = false;
+static char homePendingResultMessage[96] = "";
+static rclc_action_goal_handle_t *activeOriginGoal = nullptr;
+static uint8_t originAxis = 0;
+static float originToleranceMm = 1.0f;
+static uint32_t originStartedMs = 0;
+static uint32_t originTimeoutMs = 30000;
+static uint32_t originStableSinceMs = 0;
+static uint32_t originControlCommandId = 0;
+static bool originControlCommandAccepted = false;
+static float originStartErrorMm = 0.0f;
+static bool originResultPending = false;
+static rcl_action_goal_state_t originPendingResultState = GOAL_STATE_UNKNOWN;
+static bool originPendingResultSuccess = false;
+static char originPendingResultMessage[96] = "";
 
 static bool check(rcl_ret_t result) {
   return result == RCL_RET_OK;
@@ -120,15 +203,32 @@ static void zeroRosHandles() {
   faultPublisher = rcl_get_zero_initialized_publisher();
   emergencyStopSubscriber = rcl_get_zero_initialized_subscription();
   commandSubscriber = rcl_get_zero_initialized_subscription();
+  enableAxisService = rcl_get_zero_initialized_service();
+  setZeroService = rcl_get_zero_initialized_service();
+  setAxisLimitsService = rcl_get_zero_initialized_service();
+  clearFaultService = rcl_get_zero_initialized_service();
+  releaseStallService = rcl_get_zero_initialized_service();
+  getDriverStatusService = rcl_get_zero_initialized_service();
   moveActionServer = {};
+  homeActionServer = {};
+  originActionServer = {};
 }
 
 static void resetRosRuntimeState() {
   activeMoveGoal = nullptr;
+  activeHomeGoal = nullptr;
+  activeOriginGoal = nullptr;
   moveResultPending = false;
+  homeResultPending = false;
+  originResultPending = false;
   movePositionStableSinceMs = 0;
   moveControlCommandId = 0;
   moveControlCommandAccepted = false;
+  homeControlCommandId = 0;
+  homeControlCommandAccepted = false;
+  originControlCommandId = 0;
+  originControlCommandAccepted = false;
+  originStableSinceMs = 0;
 }
 
 static void resetRosInitFlags() {
@@ -144,7 +244,15 @@ static void resetRosInitFlags() {
   faultPublisherInitialized = false;
   emergencyStopSubscriberInitialized = false;
   commandSubscriberInitialized = false;
+  enableAxisServiceInitialized = false;
+  setZeroServiceInitialized = false;
+  setAxisLimitsServiceInitialized = false;
+  clearFaultServiceInitialized = false;
+  releaseStallServiceInitialized = false;
+  getDriverStatusServiceInitialized = false;
   moveActionServerInitialized = false;
+  homeActionServerInitialized = false;
+  originActionServerInitialized = false;
 }
 
 static void disconnectRosBridge() {
@@ -152,7 +260,15 @@ static void disconnectRosBridge() {
   resetRosRuntimeState();
 
   if (executorInitialized) ignoreRclRet(rclc_executor_fini(&executor));
+  if (originActionServerInitialized) ignoreRclRet(rclc_action_server_fini(&originActionServer, &node));
+  if (homeActionServerInitialized) ignoreRclRet(rclc_action_server_fini(&homeActionServer, &node));
   if (moveActionServerInitialized) ignoreRclRet(rclc_action_server_fini(&moveActionServer, &node));
+  if (getDriverStatusServiceInitialized) ignoreRclRet(rcl_service_fini(&getDriverStatusService, &node));
+  if (releaseStallServiceInitialized) ignoreRclRet(rcl_service_fini(&releaseStallService, &node));
+  if (clearFaultServiceInitialized) ignoreRclRet(rcl_service_fini(&clearFaultService, &node));
+  if (setAxisLimitsServiceInitialized) ignoreRclRet(rcl_service_fini(&setAxisLimitsService, &node));
+  if (setZeroServiceInitialized) ignoreRclRet(rcl_service_fini(&setZeroService, &node));
+  if (enableAxisServiceInitialized) ignoreRclRet(rcl_service_fini(&enableAxisService, &node));
   if (commandSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&commandSubscriber, &node));
   if (emergencyStopSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&emergencyStopSubscriber, &node));
   if (faultPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&faultPublisher, &node));
@@ -176,6 +292,66 @@ static void setString(rosidl_runtime_c__String &text, char *buffer, size_t capac
   text.size = size;
 }
 
+static void writeString(rosidl_runtime_c__String &text, char *buffer, size_t capacity, const char *message) {
+  const int written = snprintf(buffer, capacity, "%s", message);
+  text.data = buffer;
+  text.capacity = capacity;
+  text.size = written > 0 ? min(static_cast<size_t>(written), capacity - 1) : 0;
+}
+
+static bool waitControlCommand(uint32_t commandId, bool &accepted, uint32_t timeoutMs = 100) {
+  const uint32_t start = millis();
+  do {
+    bool known = false;
+    if (robotGetControlCommandStatus(commandId, known, accepted) && known) return true;
+    delay(1);
+  } while (millis() - start < timeoutMs);
+  accepted = false;
+  return false;
+}
+
+static float axisPositionFromSnapshot(const RobotStateSnapshot &snapshot, uint8_t axis) {
+  switch (axis) {
+    case 0:
+      return snapshot.axisPositionMm[0];
+    case 1:
+      return snapshot.axisPositionMm[1];
+    case 2:
+      return snapshot.axisPositionMm[2];
+    case 3: {
+      float maxAbs = fabsf(snapshot.axisPositionMm[0]);
+      const float yAbs = fabsf(snapshot.axisPositionMm[1]);
+      const float zAbs = fabsf(snapshot.axisPositionMm[2]);
+      if (yAbs > maxAbs) maxAbs = yAbs;
+      if (zAbs > maxAbs) maxAbs = zAbs;
+      return maxAbs;
+    }
+    default:
+      return 0.0f;
+  }
+}
+
+static float axisOriginError(const RobotStateSnapshot &snapshot, uint8_t axis) {
+  switch (axis) {
+    case 0:
+      return fabsf(snapshot.axisPositionMm[0]);
+    case 1:
+      return fabsf(snapshot.axisPositionMm[1]);
+    case 2:
+      return fabsf(snapshot.axisPositionMm[2]);
+    case 3: {
+      float maxError = fabsf(snapshot.axisPositionMm[0]);
+      const float yError = fabsf(snapshot.axisPositionMm[1]);
+      const float zError = fabsf(snapshot.axisPositionMm[2]);
+      if (yError > maxError) maxError = yError;
+      if (zError > maxError) maxError = zError;
+      return maxError;
+    }
+    default:
+      return INFINITY;
+  }
+}
+
 static void setMoveFeedbackState(const char *state) {
   const int written = snprintf(moveFeedbackStateBuffer, sizeof(moveFeedbackStateBuffer), "%s", state);
   moveFeedbackMsg.feedback.state.size =
@@ -186,6 +362,30 @@ static void setMoveResultMessage(const char *message) {
   const int written = snprintf(moveResultMessageBuffer, sizeof(moveResultMessageBuffer), "%s", message);
   moveResultResponse.result.message.size =
       written > 0 ? min(static_cast<size_t>(written), sizeof(moveResultMessageBuffer) - 1) : 0;
+}
+
+static void setHomeFeedbackState(const char *state) {
+  const int written = snprintf(homeFeedbackStateBuffer, sizeof(homeFeedbackStateBuffer), "%s", state);
+  homeFeedbackMsg.feedback.state.size =
+      written > 0 ? min(static_cast<size_t>(written), sizeof(homeFeedbackStateBuffer) - 1) : 0;
+}
+
+static void setHomeResultMessage(const char *message) {
+  const int written = snprintf(homeResultMessageBuffer, sizeof(homeResultMessageBuffer), "%s", message);
+  homeResultResponse.result.message.size =
+      written > 0 ? min(static_cast<size_t>(written), sizeof(homeResultMessageBuffer) - 1) : 0;
+}
+
+static void setOriginFeedbackState(const char *state) {
+  const int written = snprintf(originFeedbackStateBuffer, sizeof(originFeedbackStateBuffer), "%s", state);
+  originFeedbackMsg.feedback.state.size =
+      written > 0 ? min(static_cast<size_t>(written), sizeof(originFeedbackStateBuffer) - 1) : 0;
+}
+
+static void setOriginResultMessage(const char *message) {
+  const int written = snprintf(originResultMessageBuffer, sizeof(originResultMessageBuffer), "%s", message);
+  originResultResponse.result.message.size =
+      written > 0 ? min(static_cast<size_t>(written), sizeof(originResultMessageBuffer) - 1) : 0;
 }
 
 static float distance3(float x, float y, float z) {
@@ -286,8 +486,235 @@ static void queueMoveResult(rcl_action_goal_state_t state, bool success, const c
   moveResultPending = true;
   movePendingResultState = state;
   movePendingResultSuccess = success;
-  movePendingResultMessage = message;
-  finishMoveGoal(state, success, message);
+  snprintf(movePendingResultMessage, sizeof(movePendingResultMessage), "%s", message);
+  finishMoveGoal(state, success, movePendingResultMessage);
+}
+
+static void fillHomeFeedback(const RobotStateSnapshot &snapshot, const char *state) {
+  homeFeedbackMsg.feedback.axis = homeAxis;
+  homeFeedbackMsg.feedback.current_position_mm = axisPositionFromSnapshot(snapshot, homeAxis);
+  homeFeedbackMsg.feedback.progress = 0.0f;
+  if (strncmp(state, "wait_slow", 9) == 0) homeFeedbackMsg.feedback.progress = 0.75f;
+  else if (strncmp(state, "config_slow", 11) == 0 || strncmp(state, "start_slow", 10) == 0) homeFeedbackMsg.feedback.progress = 0.5f;
+  else if (strncmp(state, "wait_fast", 9) == 0) homeFeedbackMsg.feedback.progress = 0.25f;
+  else if (strncmp(state, "complete", 8) == 0) homeFeedbackMsg.feedback.progress = 1.0f;
+  setHomeFeedbackState(state);
+}
+
+static rcl_ret_t finishHomeGoal(rcl_action_goal_state_t state, bool success, const char *message) {
+  if (!activeHomeGoal) return RCL_RET_ERROR;
+
+  RobotStateSnapshot snapshot;
+  getRobotStateSnapshot(snapshot);
+
+  homeResultResponse.status = state;
+  homeResultResponse.result.success = success;
+  homeResultResponse.result.final_position_mm = axisPositionFromSnapshot(snapshot, homeAxis);
+  setHomeResultMessage(message);
+
+  const rcl_ret_t result = rclc_action_send_result(activeHomeGoal, state, &homeResultResponse);
+  if (result == RCL_RET_OK) {
+    activeHomeGoal = nullptr;
+    homeResultPending = false;
+  }
+  return result;
+}
+
+static void queueHomeResult(rcl_action_goal_state_t state, bool success, const char *message) {
+  homeResultPending = true;
+  homePendingResultState = state;
+  homePendingResultSuccess = success;
+  snprintf(homePendingResultMessage, sizeof(homePendingResultMessage), "%s", message);
+  finishHomeGoal(state, success, homePendingResultMessage);
+}
+
+static void processHomeAction(const RobotStateSnapshot &snapshot) {
+  if (!activeHomeGoal) return;
+
+  if (homeResultPending) {
+    fillHomeFeedback(snapshot, homePendingResultSuccess ? "result_pending" : "terminal_result_pending");
+    if (homePendingResultSuccess) homeFeedbackMsg.feedback.progress = 1.0f;
+    rclc_action_publish_feedback(activeHomeGoal, &homeFeedbackMsg);
+    finishHomeGoal(homePendingResultState, homePendingResultSuccess, homePendingResultMessage);
+    return;
+  }
+
+  if (activeHomeGoal->goal_cancelled) {
+    robotRequestStop();
+    fillHomeFeedback(snapshot, "canceled");
+    rclc_action_publish_feedback(activeHomeGoal, &homeFeedbackMsg);
+    queueHomeResult(GOAL_STATE_CANCELED, false, "goal canceled");
+    return;
+  }
+
+  if (snapshot.safetyFault) {
+    fillHomeFeedback(snapshot, "fault");
+    rclc_action_publish_feedback(activeHomeGoal, &homeFeedbackMsg);
+    queueHomeResult(GOAL_STATE_ABORTED, false, snapshot.safetyReason);
+    return;
+  }
+
+  if (!homeControlCommandAccepted) {
+    bool known = false;
+    bool accepted = false;
+    robotGetControlCommandStatus(homeControlCommandId, known, accepted);
+    if (!known) {
+      fillHomeFeedback(snapshot, "queued");
+      rclc_action_publish_feedback(activeHomeGoal, &homeFeedbackMsg);
+      return;
+    }
+    if (!accepted) {
+      fillHomeFeedback(snapshot, "rejected_by_control");
+      rclc_action_publish_feedback(activeHomeGoal, &homeFeedbackMsg);
+      queueHomeResult(GOAL_STATE_ABORTED, false, "control rejected home command");
+      return;
+    }
+    homeControlCommandAccepted = true;
+  }
+
+  if (millis() - homeStartedMs > homeTimeoutMs) {
+    robotRequestStop();
+    fillHomeFeedback(snapshot, "timeout");
+    rclc_action_publish_feedback(activeHomeGoal, &homeFeedbackMsg);
+    queueHomeResult(GOAL_STATE_ABORTED, false, "timeout before homing complete");
+    return;
+  }
+
+  fillHomeFeedback(snapshot, snapshot.homingState);
+  rclc_action_publish_feedback(activeHomeGoal, &homeFeedbackMsg);
+
+  if (!snapshot.homingActive) {
+    if (strncmp(snapshot.homingState, "complete", 8) == 0) {
+      homeFeedbackMsg.feedback.progress = 1.0f;
+      rclc_action_publish_feedback(activeHomeGoal, &homeFeedbackMsg);
+      queueHomeResult(GOAL_STATE_SUCCEEDED, true, "homing complete");
+    } else if (strncmp(snapshot.homingState, "failed", 6) == 0 || strncmp(snapshot.homingState, "aborted", 7) == 0) {
+      queueHomeResult(GOAL_STATE_ABORTED, false, snapshot.homingState);
+    }
+  }
+}
+
+static void fillOriginFeedback(const RobotStateSnapshot &snapshot, const char *state) {
+  const float error = axisOriginError(snapshot, originAxis);
+  originFeedbackMsg.feedback.axis = originAxis;
+  originFeedbackMsg.feedback.current_position_mm = axisPositionFromSnapshot(snapshot, originAxis);
+  originFeedbackMsg.feedback.error_mm = error;
+  if (originStartErrorMm <= 0.001f) {
+    originFeedbackMsg.feedback.progress = error <= originToleranceMm ? 1.0f : 0.0f;
+  } else {
+    originFeedbackMsg.feedback.progress = 1.0f - (error / originStartErrorMm);
+    if (originFeedbackMsg.feedback.progress < 0.0f) originFeedbackMsg.feedback.progress = 0.0f;
+    if (originFeedbackMsg.feedback.progress > 1.0f) originFeedbackMsg.feedback.progress = 1.0f;
+  }
+  setOriginFeedbackState(state);
+}
+
+static bool originIsStableAtTarget(const RobotStateSnapshot &snapshot) {
+  const float settleTolerance = originToleranceMm > ACTION_RESULT_MIN_TOLERANCE_MM
+                                    ? originToleranceMm
+                                    : ACTION_RESULT_MIN_TOLERANCE_MM;
+  if (axisOriginError(snapshot, originAxis) > settleTolerance) {
+    originStableSinceMs = 0;
+    return false;
+  }
+
+  const uint32_t now = millis();
+  if (originStableSinceMs == 0) {
+    originStableSinceMs = now;
+    return false;
+  }
+  return now - originStableSinceMs >= ACTION_RESULT_POSITION_STABLE_MS;
+}
+
+static rcl_ret_t finishOriginGoal(rcl_action_goal_state_t state, bool success, const char *message) {
+  if (!activeOriginGoal) return RCL_RET_ERROR;
+
+  RobotStateSnapshot snapshot;
+  getRobotStateSnapshot(snapshot);
+
+  originResultResponse.status = state;
+  originResultResponse.result.success = success;
+  originResultResponse.result.final_position_mm = axisPositionFromSnapshot(snapshot, originAxis);
+  setOriginResultMessage(message);
+
+  const rcl_ret_t result = rclc_action_send_result(activeOriginGoal, state, &originResultResponse);
+  if (result == RCL_RET_OK) {
+    activeOriginGoal = nullptr;
+    originResultPending = false;
+  }
+  return result;
+}
+
+static void queueOriginResult(rcl_action_goal_state_t state, bool success, const char *message) {
+  originResultPending = true;
+  originPendingResultState = state;
+  originPendingResultSuccess = success;
+  snprintf(originPendingResultMessage, sizeof(originPendingResultMessage), "%s", message);
+  finishOriginGoal(state, success, originPendingResultMessage);
+}
+
+static void processOriginAction(const RobotStateSnapshot &snapshot) {
+  if (!activeOriginGoal) return;
+
+  if (originResultPending) {
+    fillOriginFeedback(snapshot, originPendingResultSuccess ? "result_pending" : "terminal_result_pending");
+    if (originPendingResultSuccess) originFeedbackMsg.feedback.progress = 1.0f;
+    rclc_action_publish_feedback(activeOriginGoal, &originFeedbackMsg);
+    finishOriginGoal(originPendingResultState, originPendingResultSuccess, originPendingResultMessage);
+    return;
+  }
+
+  if (activeOriginGoal->goal_cancelled) {
+    robotRequestStop();
+    fillOriginFeedback(snapshot, "canceled");
+    rclc_action_publish_feedback(activeOriginGoal, &originFeedbackMsg);
+    queueOriginResult(GOAL_STATE_CANCELED, false, "goal canceled");
+    return;
+  }
+
+  if (snapshot.safetyFault) {
+    fillOriginFeedback(snapshot, "fault");
+    rclc_action_publish_feedback(activeOriginGoal, &originFeedbackMsg);
+    queueOriginResult(GOAL_STATE_ABORTED, false, snapshot.safetyReason);
+    return;
+  }
+
+  if (!originControlCommandAccepted) {
+    bool known = false;
+    bool accepted = false;
+    robotGetControlCommandStatus(originControlCommandId, known, accepted);
+    if (!known) {
+      fillOriginFeedback(snapshot, "queued");
+      rclc_action_publish_feedback(activeOriginGoal, &originFeedbackMsg);
+      return;
+    }
+    if (!accepted) {
+      fillOriginFeedback(snapshot, "rejected_by_control");
+      rclc_action_publish_feedback(activeOriginGoal, &originFeedbackMsg);
+      queueOriginResult(GOAL_STATE_ABORTED, false, "control rejected origin command");
+      return;
+    }
+    originControlCommandAccepted = true;
+  }
+
+  if (millis() - originStartedMs > originTimeoutMs) {
+    robotRequestStop();
+    fillOriginFeedback(snapshot, "timeout");
+    rclc_action_publish_feedback(activeOriginGoal, &originFeedbackMsg);
+    queueOriginResult(GOAL_STATE_ABORTED, false, "timeout before reaching origin");
+    return;
+  }
+
+  if (originIsStableAtTarget(snapshot)) {
+    fillOriginFeedback(snapshot, "arrived");
+    originFeedbackMsg.feedback.progress = 1.0f;
+    rclc_action_publish_feedback(activeOriginGoal, &originFeedbackMsg);
+    queueOriginResult(GOAL_STATE_SUCCEEDED, true, "origin reached");
+    return;
+  }
+
+  fillOriginFeedback(snapshot, snapshot.axisPositionsValid ? "moving" : "waiting_for_encoders");
+  rclc_action_publish_feedback(activeOriginGoal, &originFeedbackMsg);
 }
 
 static void stampJointState() {
@@ -417,11 +844,11 @@ static void fillTelemetryMessages() {
 
 static void publishTelemetry(rcl_timer_t *, int64_t) {
   fillTelemetryMessages();
-  rcl_publish(&jointStatePublisher, &jointStateMsg, nullptr);
-  rcl_publish(&axisPositionPublisher, &axisPositionMsg, nullptr);
-  rcl_publish(&motorRpmPublisher, &motorRpmMsg, nullptr);
-  rcl_publish(&statusPublisher, &statusMsg, nullptr);
-  rcl_publish(&faultPublisher, &faultMsg, nullptr);
+  ignoreRclRet(rcl_publish(&jointStatePublisher, &jointStateMsg, nullptr));
+  ignoreRclRet(rcl_publish(&axisPositionPublisher, &axisPositionMsg, nullptr));
+  ignoreRclRet(rcl_publish(&motorRpmPublisher, &motorRpmMsg, nullptr));
+  ignoreRclRet(rcl_publish(&statusPublisher, &statusMsg, nullptr));
+  ignoreRclRet(rcl_publish(&faultPublisher, &faultMsg, nullptr));
 
   if (activeMoveGoal) {
     if (moveResultPending) {
@@ -487,6 +914,11 @@ static void publishTelemetry(rcl_timer_t *, int64_t) {
     fillMoveFeedback(snapshot.axisPositionsValid ? "moving" : "waiting_for_encoders");
     rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
   }
+
+  RobotStateSnapshot actionSnapshot;
+  getRobotStateSnapshot(actionSnapshot);
+  processHomeAction(actionSnapshot);
+  processOriginAction(actionSnapshot);
 }
 
 static void onEmergencyStop(const void *msgIn) {
@@ -504,8 +936,104 @@ static void onCommand(const void *msgIn) {
   robotRequestCommandText(commandBuffer);
 }
 
+static void finishCommandService(bool queued, uint32_t commandId, bool &success, rosidl_runtime_c__String &message, char *buffer, size_t capacity) {
+  if (!queued) {
+    success = false;
+    writeString(message, buffer, capacity, "queue full");
+    return;
+  }
+
+  bool accepted = false;
+  if (waitControlCommand(commandId, accepted)) {
+    success = accepted;
+    writeString(message, buffer, capacity, accepted ? "accepted" : "rejected by control");
+    return;
+  }
+
+  success = true;
+  writeString(message, buffer, capacity, "queued");
+}
+
+static void onEnableAxisService(const void *requestIn, void *responseOut) {
+  const auto *request = static_cast<const palletizer_msgs__srv__EnableAxis_Request *>(requestIn);
+  auto *response = static_cast<palletizer_msgs__srv__EnableAxis_Response *>(responseOut);
+  uint32_t commandId = 0;
+  const bool queued = robotRequestSetAxisEnable(request->axis, request->enable, commandId);
+  finishCommandService(queued, commandId, response->success, response->message, serviceMessageBuffers[0], sizeof(serviceMessageBuffers[0]));
+}
+
+static void onSetZeroService(const void *requestIn, void *responseOut) {
+  const auto *request = static_cast<const palletizer_msgs__srv__SetZero_Request *>(requestIn);
+  auto *response = static_cast<palletizer_msgs__srv__SetZero_Response *>(responseOut);
+  uint32_t commandId = 0;
+  const bool queued = robotRequestSetZero(request->axis, request->min_mm, request->max_mm, commandId);
+  finishCommandService(queued, commandId, response->success, response->message, serviceMessageBuffers[1], sizeof(serviceMessageBuffers[1]));
+}
+
+static void onSetAxisLimitsService(const void *requestIn, void *responseOut) {
+  const auto *request = static_cast<const palletizer_msgs__srv__SetAxisLimits_Request *>(requestIn);
+  auto *response = static_cast<palletizer_msgs__srv__SetAxisLimits_Response *>(responseOut);
+  uint32_t commandId = 0;
+  const bool queued = robotRequestSetAxisLimits(request->axis, request->min_mm, request->max_mm, commandId);
+  finishCommandService(queued, commandId, response->success, response->message, serviceMessageBuffers[2], sizeof(serviceMessageBuffers[2]));
+}
+
+static void onClearFaultService(const void *, void *responseOut) {
+  auto *response = static_cast<palletizer_msgs__srv__ClearFault_Response *>(responseOut);
+  uint32_t commandId = 0;
+  const bool queued = robotRequestClearFault(commandId);
+  finishCommandService(queued, commandId, response->success, response->message, serviceMessageBuffers[3], sizeof(serviceMessageBuffers[3]));
+}
+
+static void onReleaseStallService(const void *requestIn, void *responseOut) {
+  const auto *request = static_cast<const palletizer_msgs__srv__ReleaseStall_Request *>(requestIn);
+  auto *response = static_cast<palletizer_msgs__srv__ReleaseStall_Response *>(responseOut);
+  uint32_t commandId = 0;
+  const bool queued = robotRequestReleaseStall(request->axis, commandId);
+  finishCommandService(queued, commandId, response->success, response->message, serviceMessageBuffers[4], sizeof(serviceMessageBuffers[4]));
+}
+
+static void onGetDriverStatusService(const void *, void *responseOut) {
+  auto *response = static_cast<palletizer_msgs__srv__GetDriverStatus_Response *>(responseOut);
+  RobotStateSnapshot snapshot{};
+  const bool haveSnapshot = getRobotStateSnapshot(snapshot);
+
+  response->success = haveSnapshot;
+  response->safety_fault = snapshot.safetyFault;
+  writeString(response->message, driverStatusMessageBuffer, sizeof(driverStatusMessageBuffer), haveSnapshot ? "ok" : "no snapshot");
+  writeString(response->safety_reason, driverStatusSafetyReasonBuffer, sizeof(driverStatusSafetyReasonBuffer), snapshot.safetyReason);
+  writeString(response->homing_state, driverStatusHomingStateBuffer, sizeof(driverStatusHomingStateBuffer), snapshot.homingState);
+
+  for (size_t i = 0; i < 4; i++) {
+    response->online[i] = snapshot.motorOnline[i];
+    response->enabled_ok[i] = snapshot.enabledOk[i];
+    response->enabled[i] = snapshot.enabled[i];
+    response->stalled[i] = snapshot.stalled[i];
+    response->raw35_ok[i] = snapshot.rawEncoderOk[i];
+    response->angle_error_ok[i] = snapshot.angleErrorOk[i];
+    response->enc31[i] = snapshot.encoder[i];
+    response->raw35[i] = snapshot.rawDiagnosticEncoder[i];
+    response->position_mm[i] = snapshot.motorPositionMm[i];
+    response->velocity_mm_s[i] = snapshot.motorVelocityMmS[i];
+    response->angle_error[i] = snapshot.angleError[i];
+    response->home91[i] = snapshot.homeStatus[i];
+    response->home3b_single[i] = snapshot.homeStatusSingleTurn[i];
+    response->home3b_origin[i] = snapshot.homeStatusOrigin[i];
+  }
+
+  for (size_t i = 0; i < 3; i++) {
+    response->limits_configured[i] = snapshot.axisLimitsConfigured[i];
+    response->limit_min_mm[i] = snapshot.axisMinMm[i];
+    response->limit_max_mm[i] = snapshot.axisMaxMm[i];
+  }
+}
+
+static bool anyActionActive() {
+  return activeMoveGoal || activeHomeGoal || activeOriginGoal;
+}
+
 static rcl_ret_t onMoveGoal(rclc_action_goal_handle_t *goalHandle, void *) {
-  if (activeMoveGoal) {
+  if (anyActionActive()) {
     return RCL_RET_ACTION_GOAL_REJECTED;
   }
 
@@ -557,6 +1085,81 @@ static bool onMoveCancel(rclc_action_goal_handle_t *goalHandle, void *) {
   return true;
 }
 
+static rcl_ret_t onHomeGoal(rclc_action_goal_handle_t *goalHandle, void *) {
+  if (anyActionActive()) return RCL_RET_ACTION_GOAL_REJECTED;
+
+  auto *request =
+      reinterpret_cast<palletizer_msgs__action__HomeAxis_SendGoal_Request *>(goalHandle->ros_goal_request);
+
+  homeAxis = request->goal.axis;
+  homeStartedMs = millis();
+  homeTimeoutMs = request->goal.timeout_ms > 0 ? request->goal.timeout_ms : HOME_PHASE_TIMEOUT_MS * 2;
+  homeControlCommandId = 0;
+  homeControlCommandAccepted = false;
+
+  const uint16_t fastRpm = request->goal.fast_rpm > 0.0f
+                               ? static_cast<uint16_t>(min(static_cast<int32_t>(roundf(request->goal.fast_rpm)), static_cast<int32_t>(MAX_RPM)))
+                               : 0;
+  const uint16_t slowRpm = request->goal.slow_rpm > 0.0f
+                               ? static_cast<uint16_t>(min(static_cast<int32_t>(roundf(request->goal.slow_rpm)), static_cast<int32_t>(MAX_RPM)))
+                               : 0;
+  const bool commandQueued = robotRequestHomeAxis(
+      homeAxis,
+      request->goal.set_limits,
+      request->goal.min_mm,
+      request->goal.max_mm,
+      fastRpm,
+      slowRpm,
+      homeControlCommandId);
+
+  if (!commandQueued) return RCL_RET_ACTION_GOAL_REJECTED;
+
+  RobotStateSnapshot snapshot;
+  getRobotStateSnapshot(snapshot);
+  activeHomeGoal = goalHandle;
+  fillHomeFeedback(snapshot, "accepted");
+  rclc_action_publish_feedback(activeHomeGoal, &homeFeedbackMsg);
+  return RCL_RET_ACTION_GOAL_ACCEPTED;
+}
+
+static bool onHomeCancel(rclc_action_goal_handle_t *goalHandle, void *) {
+  if (goalHandle != activeHomeGoal) return false;
+  robotRequestStop();
+  return true;
+}
+
+static rcl_ret_t onOriginGoal(rclc_action_goal_handle_t *goalHandle, void *) {
+  if (anyActionActive()) return RCL_RET_ACTION_GOAL_REJECTED;
+
+  auto *request =
+      reinterpret_cast<palletizer_msgs__action__GoOrigin_SendGoal_Request *>(goalHandle->ros_goal_request);
+
+  RobotStateSnapshot snapshot;
+  getRobotStateSnapshot(snapshot);
+  originAxis = request->goal.axis;
+  originToleranceMm = request->goal.tolerance_mm > 0.0f ? request->goal.tolerance_mm : 1.0f;
+  originStartedMs = millis();
+  originTimeoutMs = request->goal.timeout_ms > 0 ? request->goal.timeout_ms : 30000;
+  originStableSinceMs = 0;
+  originStartErrorMm = axisOriginError(snapshot, originAxis);
+  originControlCommandId = 0;
+  originControlCommandAccepted = false;
+
+  const bool commandQueued = robotRequestGoOrigin(originAxis, originControlCommandId);
+  if (!commandQueued) return RCL_RET_ACTION_GOAL_REJECTED;
+
+  activeOriginGoal = goalHandle;
+  fillOriginFeedback(snapshot, "accepted");
+  rclc_action_publish_feedback(activeOriginGoal, &originFeedbackMsg);
+  return RCL_RET_ACTION_GOAL_ACCEPTED;
+}
+
+static bool onOriginCancel(rclc_action_goal_handle_t *goalHandle, void *) {
+  if (goalHandle != activeOriginGoal) return false;
+  robotRequestStop();
+  return true;
+}
+
 static void initMessages() {
   setString(jointStateMsg.header.frame_id, frameIdBuffer, sizeof(frameIdBuffer), strlen(frameIdBuffer));
 
@@ -596,8 +1199,20 @@ static void initMessages() {
   setString(statusMsg.data, statusBuffer, sizeof(statusBuffer));
   setString(faultMsg.data, faultBuffer, sizeof(faultBuffer));
   setString(commandMsg.data, commandBuffer, sizeof(commandBuffer));
+  setString(enableAxisResponse.message, serviceMessageBuffers[0], sizeof(serviceMessageBuffers[0]));
+  setString(setZeroResponse.message, serviceMessageBuffers[1], sizeof(serviceMessageBuffers[1]));
+  setString(setAxisLimitsResponse.message, serviceMessageBuffers[2], sizeof(serviceMessageBuffers[2]));
+  setString(clearFaultResponse.message, serviceMessageBuffers[3], sizeof(serviceMessageBuffers[3]));
+  setString(releaseStallResponse.message, serviceMessageBuffers[4], sizeof(serviceMessageBuffers[4]));
+  setString(getDriverStatusResponse.message, driverStatusMessageBuffer, sizeof(driverStatusMessageBuffer));
+  setString(getDriverStatusResponse.safety_reason, driverStatusSafetyReasonBuffer, sizeof(driverStatusSafetyReasonBuffer));
+  setString(getDriverStatusResponse.homing_state, driverStatusHomingStateBuffer, sizeof(driverStatusHomingStateBuffer));
   setString(moveFeedbackMsg.feedback.state, moveFeedbackStateBuffer, sizeof(moveFeedbackStateBuffer));
   setString(moveResultResponse.result.message, moveResultMessageBuffer, sizeof(moveResultMessageBuffer));
+  setString(homeFeedbackMsg.feedback.state, homeFeedbackStateBuffer, sizeof(homeFeedbackStateBuffer));
+  setString(homeResultResponse.result.message, homeResultMessageBuffer, sizeof(homeResultMessageBuffer));
+  setString(originFeedbackMsg.feedback.state, originFeedbackStateBuffer, sizeof(originFeedbackStateBuffer));
+  setString(originResultResponse.result.message, originResultMessageBuffer, sizeof(originResultMessageBuffer));
 }
 
 bool beginRosBridge() {
@@ -691,6 +1306,54 @@ bool beginRosBridge() {
     return false;
   }
   commandSubscriberInitialized = true;
+  if (!check(rclc_service_init_default(
+          &enableAxisService, &node,
+          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, EnableAxis),
+          "/palletizer/enable_axis"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  enableAxisServiceInitialized = true;
+  if (!check(rclc_service_init_default(
+          &setZeroService, &node,
+          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetZero),
+          "/palletizer/set_zero"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  setZeroServiceInitialized = true;
+  if (!check(rclc_service_init_default(
+          &setAxisLimitsService, &node,
+          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetAxisLimits),
+          "/palletizer/set_axis_limits"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  setAxisLimitsServiceInitialized = true;
+  if (!check(rclc_service_init_default(
+          &clearFaultService, &node,
+          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ClearFault),
+          "/palletizer/clear_fault"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  clearFaultServiceInitialized = true;
+  if (!check(rclc_service_init_default(
+          &releaseStallService, &node,
+          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ReleaseStall),
+          "/palletizer/release_stall"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  releaseStallServiceInitialized = true;
+  if (!check(rclc_service_init_default(
+          &getDriverStatusService, &node,
+          ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, GetDriverStatus),
+          "/palletizer/get_driver_status"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  getDriverStatusServiceInitialized = true;
   if (!check(rclc_action_server_init_default(
           &moveActionServer,
           &node,
@@ -701,6 +1364,26 @@ bool beginRosBridge() {
     return false;
   }
   moveActionServerInitialized = true;
+  if (!check(rclc_action_server_init_default(
+          &homeActionServer,
+          &node,
+          &support,
+          ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, HomeAxis),
+          "/palletizer/home_axis"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  homeActionServerInitialized = true;
+  if (!check(rclc_action_server_init_default(
+          &originActionServer,
+          &node,
+          &support,
+          ROSIDL_GET_ACTION_TYPE_SUPPORT(palletizer_msgs, GoOrigin),
+          "/palletizer/go_origin"))) {
+    disconnectRosBridge();
+    return false;
+  }
+  originActionServerInitialized = true;
 
   initMessages();
 
@@ -714,7 +1397,7 @@ bool beginRosBridge() {
   }
   telemetryTimerInitialized = true;
 
-  if (!check(rclc_executor_init(&executor, &support.context, 4, &allocator))) {
+  if (!check(rclc_executor_init(&executor, &support.context, ROS_EXECUTOR_HANDLES, &allocator))) {
     disconnectRosBridge();
     return false;
   }
@@ -741,6 +1424,60 @@ bool beginRosBridge() {
     disconnectRosBridge();
     return false;
   }
+  if (!check(rclc_executor_add_service(
+          &executor,
+          &enableAxisService,
+          &enableAxisRequest,
+          &enableAxisResponse,
+          onEnableAxisService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_service(
+          &executor,
+          &setZeroService,
+          &setZeroRequest,
+          &setZeroResponse,
+          onSetZeroService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_service(
+          &executor,
+          &setAxisLimitsService,
+          &setAxisLimitsRequest,
+          &setAxisLimitsResponse,
+          onSetAxisLimitsService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_service(
+          &executor,
+          &clearFaultService,
+          &clearFaultRequest,
+          &clearFaultResponse,
+          onClearFaultService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_service(
+          &executor,
+          &releaseStallService,
+          &releaseStallRequest,
+          &releaseStallResponse,
+          onReleaseStallService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_service(
+          &executor,
+          &getDriverStatusService,
+          &getDriverStatusRequest,
+          &getDriverStatusResponse,
+          onGetDriverStatusService))) {
+    disconnectRosBridge();
+    return false;
+  }
   if (!check(rclc_executor_add_action_server(
           &executor,
           &moveActionServer,
@@ -749,6 +1486,30 @@ bool beginRosBridge() {
           sizeof(moveGoalRequest),
           onMoveGoal,
           onMoveCancel,
+          nullptr))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_action_server(
+          &executor,
+          &homeActionServer,
+          1,
+          &homeGoalRequest,
+          sizeof(homeGoalRequest),
+          onHomeGoal,
+          onHomeCancel,
+          nullptr))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_action_server(
+          &executor,
+          &originActionServer,
+          1,
+          &originGoalRequest,
+          sizeof(originGoalRequest),
+          onOriginGoal,
+          onOriginCancel,
           nullptr))) {
     disconnectRosBridge();
     return false;

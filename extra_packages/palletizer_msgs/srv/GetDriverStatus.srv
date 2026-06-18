@@ -1,0 +1,23 @@
+---
+bool success
+string message
+bool safety_fault
+string safety_reason
+string homing_state
+bool[4] online
+bool[4] enabled_ok
+bool[4] enabled
+bool[4] stalled
+bool[4] raw35_ok
+bool[4] angle_error_ok
+int64[4] enc31
+int64[4] raw35
+float32[4] position_mm
+float32[4] velocity_mm_s
+int32[4] angle_error
+uint8[4] home91
+uint8[4] home3b_single
+uint8[4] home3b_origin
+bool[3] limits_configured
+float32[3] limit_min_mm
+float32[3] limit_max_mm

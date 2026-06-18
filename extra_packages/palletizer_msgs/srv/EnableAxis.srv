@@ -1,0 +1,10 @@
+uint8 AXIS_X=0
+uint8 AXIS_Y=1
+uint8 AXIS_Z=2
+uint8 AXIS_ALL=3
+
+uint8 axis
+bool enable
+---
+bool success
+string message
