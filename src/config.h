@@ -63,8 +63,10 @@ static constexpr int MICRO_ROS_PING_TIMEOUT_MS = 100;
 static constexpr uint8_t MICRO_ROS_PING_ATTEMPTS = 3;
 static constexpr int MICRO_ROS_ENTITY_CREATION_TIMEOUT_MS = 15000;
 static constexpr int MICRO_ROS_ENTITY_DESTROY_TIMEOUT_MS = 15000;
+static constexpr uint32_t ACTION_PROCESS_PERIOD_MS = 10;
+static constexpr uint32_t ACTION_FEEDBACK_PERIOD_MS = 50;
 static constexpr float ACTION_RESULT_MIN_TOLERANCE_MM = 1.0f;
-static constexpr uint32_t ACTION_RESULT_POSITION_STABLE_MS = 250;
+static constexpr uint32_t ACTION_RESULT_POSITION_STABLE_MS = 100;
 
 // Homing MKS 0x91/0x90. Los valores de trigger/direccion/limite dependen del
 // cableado fisico de los finales de carrera. Los defaults replican el ejemplo

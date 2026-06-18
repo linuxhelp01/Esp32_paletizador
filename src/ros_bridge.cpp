@@ -110,9 +110,13 @@ static char frameIdBuffer[] = "palletizer_base";
 static char jointNameBuffers[4][4] = {"X1", "X2", "Y", "Z"};
 
 static constexpr size_t ROS_EXECUTOR_TIMERS = 1;
-static constexpr size_t ROS_EXECUTOR_SUBSCRIPTIONS = 2;
+static constexpr bool ROS_ENABLE_COMMAND_SUBSCRIBER = false;
+static constexpr size_t ROS_EXECUTOR_SUBSCRIPTIONS = ROS_ENABLE_COMMAND_SUBSCRIBER ? 2 : 1;
 static constexpr bool ROS_ENABLE_SERVICE_SERVERS = false;
-static constexpr size_t ROS_EXECUTOR_SERVICES = ROS_ENABLE_SERVICE_SERVERS ? 6 : 0;
+static constexpr bool ROS_ENABLE_EXTENDED_SERVICE_SERVERS = false;
+static constexpr size_t ROS_EXECUTOR_SERVICES = ROS_ENABLE_SERVICE_SERVERS
+                                                   ? (ROS_ENABLE_EXTENDED_SERVICE_SERVERS ? 6 : 2)
+                                                   : 0;
 static constexpr bool ROS_ENABLE_HOME_ORIGIN_ACTIONS = false;
 static constexpr size_t ROS_EXECUTOR_ACTIONS = ROS_ENABLE_HOME_ORIGIN_ACTIONS ? 3 : 1;
 static constexpr size_t ROS_EXECUTOR_SPARES = 2;
@@ -158,6 +162,7 @@ static float moveToleranceMm = 1.0f;
 static uint32_t moveStartedMs = 0;
 static uint32_t moveTimeoutMs = 30000;
 static uint32_t movePositionStableSinceMs = 0;
+static uint32_t lastMoveFeedbackMs = 0;
 static bool moveResultPending = false;
 static rcl_action_goal_state_t movePendingResultState = GOAL_STATE_UNKNOWN;
 static bool movePendingResultSuccess = false;
@@ -228,6 +233,7 @@ static void resetRosRuntimeState() {
   homeResultPending = false;
   originResultPending = false;
   movePositionStableSinceMs = 0;
+  lastMoveFeedbackMs = 0;
   moveControlCommandId = 0;
   moveControlCommandAccepted = false;
   homeControlCommandId = 0;
@@ -494,6 +500,29 @@ static void queueMoveResult(rcl_action_goal_state_t state, bool success, const c
   movePendingResultSuccess = success;
   snprintf(movePendingResultMessage, sizeof(movePendingResultMessage), "%s", message);
   finishMoveGoal(state, success, movePendingResultMessage);
+}
+
+static bool moveFeedbackDue() {
+  const uint32_t now = millis();
+  if (lastMoveFeedbackMs != 0 && now - lastMoveFeedbackMs < ACTION_FEEDBACK_PERIOD_MS) {
+    return false;
+  }
+  lastMoveFeedbackMs = now;
+  return true;
+}
+
+static void publishMoveFeedback(const char *state, bool force = false) {
+  if (!activeMoveGoal) return;
+  if (!force && !moveFeedbackDue()) return;
+  fillMoveFeedback(state);
+  ignoreRclRet(rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg));
+}
+
+static void publishMoveFeedbackComplete(const char *state) {
+  if (!activeMoveGoal) return;
+  fillMoveFeedback(state);
+  moveFeedbackMsg.feedback.progress = 1.0f;
+  ignoreRclRet(rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg));
 }
 
 static void fillHomeFeedback(const RobotStateSnapshot &snapshot, const char *state) {
@@ -848,6 +877,8 @@ static void fillTelemetryMessages() {
   faultMsg.data.size = faultWritten > 0 ? min(static_cast<size_t>(faultWritten), sizeof(faultBuffer) - 1) : 0;
 }
 
+static void processActions();
+
 static void publishTelemetry(rcl_timer_t *, int64_t) {
   fillTelemetryMessages();
   ignoreRclRet(rcl_publish(&jointStatePublisher, &jointStateMsg, nullptr));
@@ -855,20 +886,24 @@ static void publishTelemetry(rcl_timer_t *, int64_t) {
   ignoreRclRet(rcl_publish(&motorRpmPublisher, &motorRpmMsg, nullptr));
   ignoreRclRet(rcl_publish(&statusPublisher, &statusMsg, nullptr));
   ignoreRclRet(rcl_publish(&faultPublisher, &faultMsg, nullptr));
+  processActions();
+}
 
+static void processActions() {
   if (activeMoveGoal) {
     if (moveResultPending) {
-      fillMoveFeedback(movePendingResultSuccess ? "result_pending" : "terminal_result_pending");
-      if (movePendingResultSuccess) moveFeedbackMsg.feedback.progress = 1.0f;
-      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      if (movePendingResultSuccess) {
+        publishMoveFeedbackComplete("result_pending");
+      } else {
+        publishMoveFeedback("terminal_result_pending", true);
+      }
       finishMoveGoal(movePendingResultState, movePendingResultSuccess, movePendingResultMessage);
       return;
     }
 
     if (activeMoveGoal->goal_cancelled) {
       robotRequestStop();
-      fillMoveFeedback("canceled");
-      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      publishMoveFeedback("canceled", true);
       queueMoveResult(GOAL_STATE_CANCELED, false, "goal canceled");
       return;
     }
@@ -877,8 +912,7 @@ static void publishTelemetry(rcl_timer_t *, int64_t) {
     getRobotStateSnapshot(snapshot);
 
     if (snapshot.safetyFault) {
-      fillMoveFeedback("fault");
-      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      publishMoveFeedback("fault", true);
       queueMoveResult(GOAL_STATE_ABORTED, false, snapshot.safetyReason);
       return;
     }
@@ -888,13 +922,11 @@ static void publishTelemetry(rcl_timer_t *, int64_t) {
       bool accepted = false;
       robotGetMoveCommandStatus(moveControlCommandId, known, accepted);
       if (!known) {
-        fillMoveFeedback("queued");
-        rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+        publishMoveFeedback("queued");
         return;
       }
       if (!accepted) {
-        fillMoveFeedback("rejected_by_control");
-        rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+        publishMoveFeedback("rejected_by_control", true);
         queueMoveResult(GOAL_STATE_ABORTED, false, "control rejected move command");
         return;
       }
@@ -903,22 +935,18 @@ static void publishTelemetry(rcl_timer_t *, int64_t) {
 
     if (millis() - moveStartedMs > moveTimeoutMs) {
       robotRequestStop();
-      fillMoveFeedback("timeout");
-      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      publishMoveFeedback("timeout", true);
       queueMoveResult(GOAL_STATE_ABORTED, false, "timeout before reaching target");
       return;
     }
 
     if (measuredPositionIsStableAtTarget()) {
-      fillMoveFeedback("arrived");
-      moveFeedbackMsg.feedback.progress = 1.0f;
-      rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+      publishMoveFeedbackComplete("arrived");
       queueMoveResult(GOAL_STATE_SUCCEEDED, true, "target reached");
       return;
     }
 
-    fillMoveFeedback(snapshot.axisPositionsValid ? "moving" : "waiting_for_encoders");
-    rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+    publishMoveFeedback(snapshot.axisPositionsValid ? "moving" : "waiting_for_encoders");
   }
 
   RobotStateSnapshot actionSnapshot;
@@ -1080,8 +1108,9 @@ static rcl_ret_t onMoveGoal(rclc_action_goal_handle_t *goalHandle, void *) {
   }
 
   activeMoveGoal = goalHandle;
+  lastMoveFeedbackMs = millis();
   fillMoveFeedback("accepted");
-  rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg);
+  ignoreRclRet(rclc_action_publish_feedback(activeMoveGoal, &moveFeedbackMsg));
   return RCL_RET_ACTION_GOAL_ACCEPTED;
 }
 
@@ -1342,14 +1371,16 @@ bool beginRosBridge() {
     return false;
   }
   emergencyStopSubscriberInitialized = true;
-  if (!check(rclc_subscription_init_best_effort(
-          &commandSubscriber, &node,
-          ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
-          "/palletizer/command"))) {
-    disconnectRosBridge();
-    return false;
+  if (ROS_ENABLE_COMMAND_SUBSCRIBER) {
+    if (!check(rclc_subscription_init_best_effort(
+            &commandSubscriber, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
+            "/palletizer/command"))) {
+      disconnectRosBridge();
+      return false;
+    }
+    commandSubscriberInitialized = true;
   }
-  commandSubscriberInitialized = true;
 
   if (ROS_ENABLE_SERVICE_SERVERS) {
     if (check(rclc_service_init_default(
@@ -1361,14 +1392,6 @@ bool beginRosBridge() {
       rcl_reset_error();
     }
     if (check(rclc_service_init_default(
-            &setZeroService, &node,
-            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetZero),
-            "/palletizer/set_zero"))) {
-      setZeroServiceInitialized = true;
-    } else {
-      rcl_reset_error();
-    }
-    if (check(rclc_service_init_default(
             &setAxisLimitsService, &node,
             ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetAxisLimits),
             "/palletizer/set_axis_limits"))) {
@@ -1376,29 +1399,39 @@ bool beginRosBridge() {
     } else {
       rcl_reset_error();
     }
-    if (check(rclc_service_init_default(
-            &clearFaultService, &node,
-            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ClearFault),
-            "/palletizer/clear_fault"))) {
-      clearFaultServiceInitialized = true;
-    } else {
-      rcl_reset_error();
-    }
-    if (check(rclc_service_init_default(
-            &releaseStallService, &node,
-            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ReleaseStall),
-            "/palletizer/release_stall"))) {
-      releaseStallServiceInitialized = true;
-    } else {
-      rcl_reset_error();
-    }
-    if (check(rclc_service_init_default(
-            &getDriverStatusService, &node,
-            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, GetDriverStatus),
-            "/palletizer/get_driver_status"))) {
-      getDriverStatusServiceInitialized = true;
-    } else {
-      rcl_reset_error();
+    if (ROS_ENABLE_EXTENDED_SERVICE_SERVERS) {
+      if (check(rclc_service_init_default(
+              &setZeroService, &node,
+              ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetZero),
+              "/palletizer/set_zero"))) {
+        setZeroServiceInitialized = true;
+      } else {
+        rcl_reset_error();
+      }
+      if (check(rclc_service_init_default(
+              &clearFaultService, &node,
+              ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ClearFault),
+              "/palletizer/clear_fault"))) {
+        clearFaultServiceInitialized = true;
+      } else {
+        rcl_reset_error();
+      }
+      if (check(rclc_service_init_default(
+              &releaseStallService, &node,
+              ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, ReleaseStall),
+              "/palletizer/release_stall"))) {
+        releaseStallServiceInitialized = true;
+      } else {
+        rcl_reset_error();
+      }
+      if (check(rclc_service_init_default(
+              &getDriverStatusService, &node,
+              ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, GetDriverStatus),
+              "/palletizer/get_driver_status"))) {
+        getDriverStatusServiceInitialized = true;
+      } else {
+        rcl_reset_error();
+      }
     }
   }
 
@@ -1432,7 +1465,7 @@ bool beginRosBridge() {
     disconnectRosBridge();
     return false;
   }
-  if (!check(rclc_executor_add_subscription(
+  if (ROS_ENABLE_COMMAND_SUBSCRIBER && !check(rclc_executor_add_subscription(
           &executor,
           &commandSubscriber,
           &commandMsg,
@@ -1490,7 +1523,7 @@ bool beginRosBridge() {
     disconnectRosBridge();
     return false;
   }
-  if (ROS_ENABLE_SERVICE_SERVERS && setZeroServiceInitialized &&
+  if (ROS_ENABLE_EXTENDED_SERVICE_SERVERS && setZeroServiceInitialized &&
       !check(rclc_executor_add_service(
           &executor,
           &setZeroService,
@@ -1510,7 +1543,7 @@ bool beginRosBridge() {
     disconnectRosBridge();
     return false;
   }
-  if (ROS_ENABLE_SERVICE_SERVERS && clearFaultServiceInitialized &&
+  if (ROS_ENABLE_EXTENDED_SERVICE_SERVERS && clearFaultServiceInitialized &&
       !check(rclc_executor_add_service(
           &executor,
           &clearFaultService,
@@ -1520,7 +1553,7 @@ bool beginRosBridge() {
     disconnectRosBridge();
     return false;
   }
-  if (ROS_ENABLE_SERVICE_SERVERS && releaseStallServiceInitialized &&
+  if (ROS_ENABLE_EXTENDED_SERVICE_SERVERS && releaseStallServiceInitialized &&
       !check(rclc_executor_add_service(
           &executor,
           &releaseStallService,
@@ -1530,7 +1563,7 @@ bool beginRosBridge() {
     disconnectRosBridge();
     return false;
   }
-  if (ROS_ENABLE_SERVICE_SERVERS && getDriverStatusServiceInitialized &&
+  if (ROS_ENABLE_EXTENDED_SERVICE_SERVERS && getDriverStatusServiceInitialized &&
       !check(rclc_executor_add_service(
           &executor,
           &getDriverStatusService,
