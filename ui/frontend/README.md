@@ -37,3 +37,27 @@ Abrir:
 ```text
 http://localhost:5173
 ```
+
+
+## Gemelo digital 3D
+
+El panel 3D usa `three`, `@react-three/fiber` y `@react-three/drei`.
+
+El target del extremo se controla con el raton sobre el plano de trabajo. Z,
+velocidad, aceleracion, tolerancia y timeout se ingresan con teclado. Al
+confirmar, el frontend envia el mismo comando WebSocket `move_xyz` al backend.
+
+Los archivos para el modelo real deben ir en:
+
+```text
+public/robot_description/
+```
+
+Guia detallada:
+
+```text
+../GUIA_MODELO_3D_REACT.md
+```
+
+Si estas en WSL, usa Node/NPM instalado dentro de Ubuntu. No uses el `npm` de
+Windows sobre rutas `\\wsl.localhost\...`.

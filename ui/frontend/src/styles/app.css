@@ -258,6 +258,69 @@ th {
   word-break: break-word;
 }
 
+
+
+.twin-section {
+  border-color: #c4d8e4;
+}
+
+.twin-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 360px);
+  gap: 14px;
+  align-items: stretch;
+}
+
+.twin-canvas {
+  min-height: 520px;
+  overflow: hidden;
+  border: 1px solid #d3dbe4;
+  border-radius: 8px;
+  background: #f6f8fa;
+}
+
+.twin-controls {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.twin-readout {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.twin-readout div {
+  border: 1px solid #dbe1e8;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fafb;
+}
+
+.twin-readout span {
+  display: block;
+  color: #5a6675;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.twin-readout strong {
+  display: block;
+  margin-top: 5px;
+  font-size: 15px;
+}
+
+.form-grid.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.twin-controls button.primary {
+  width: 100%;
+}
+
 .safety {
   border-color: #e5b0b5;
 }
@@ -307,6 +370,10 @@ th {
 }
 
 @media (max-width: 1100px) {
+  .twin-layout {
+    grid-template-columns: 1fr;
+  }
+
   .layout {
     grid-template-columns: 1fr;
   }
@@ -322,6 +389,10 @@ th {
 }
 
 @media (max-width: 760px) {
+  .twin-canvas {
+    min-height: 380px;
+  }
+
   .app {
     padding: 12px;
   }
@@ -336,6 +407,7 @@ th {
   }
 
   .metric-grid.three,
+  .twin-readout,
   .form-grid,
   .feedback,
   .inline-controls,

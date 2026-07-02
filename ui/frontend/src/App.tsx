@@ -1,4 +1,5 @@
 import { EventLog } from "./components/EventLog";
+import { DigitalTwinPanel } from "./components/DigitalTwin/DigitalTwinPanel";
 import { HomingControls } from "./components/HomingControls";
 import { JointStatePanel } from "./components/JointStatePanel";
 import { MoveControl } from "./components/MoveControl";
@@ -17,6 +18,7 @@ export function App() {
       <div className="layout">
         <div className="main-column">
           <TelemetryPanel state={state} />
+          <DigitalTwinPanel state={state} send={send} />
           <MoveControl state={state} lastFeedback={lastFeedback} lastResult={lastResult} send={send} />
           <JointStatePanel state={state} />
         </div>

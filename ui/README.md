@@ -26,6 +26,8 @@ WebSocket. El backend es un nodo ROS 2 `rclpy` que:
 - envia goals a `/palletizer/move_xyz`
 - deja preparados servicios y actions secundarios para cuando el firmware los exponga
 
+La interfaz incluye un panel de gemelo digital 3D. El panel actual usa una geometria plantilla y permite mover el target del extremo con el raton, ingresar Z, velocidad y aceleracion con teclado, y enviar el movimiento por `/palletizer/move_xyz`.
+
 ## Arranque
 
 Terminal 1: agente micro-ROS.
@@ -61,6 +63,66 @@ Abrir:
 http://localhost:5173
 ```
 
+
+## Arranque con launch file
+
+Tambien puedes iniciar todo desde un solo launch de ROS 2:
+
+```bash
+source /opt/ros/humble/setup.bash
+ros2 launch /home/felipe/proyecto/Esp32_paletizador/ui/launch/palletizer_ui.launch.py
+```
+
+Esto inicia:
+
+```text
+micro_ros_agent
+/palletizer_ui_backend
+React/Vite en http://localhost:5173
+```
+
+Argumentos principales:
+
+```bash
+ros2 launch /home/felipe/proyecto/Esp32_paletizador/ui/launch/palletizer_ui.launch.py \
+  serial_dev:=/dev/ttyACM0 \
+  ros_domain_id:=10 \
+  frontend_port:=5173 \
+  backend_port:=8765
+```
+
+Si el agente ya esta corriendo:
+
+```bash
+ros2 launch /home/felipe/proyecto/Esp32_paletizador/ui/launch/palletizer_ui.launch.py start_agent:=false
+```
+
+Si solo quieres backend y agente, sin React:
+
+```bash
+ros2 launch /home/felipe/proyecto/Esp32_paletizador/ui/launch/palletizer_ui.launch.py start_frontend:=false
+```
+
+Si React ya esta corriendo:
+
+```bash
+ros2 launch /home/felipe/proyecto/Esp32_paletizador/ui/launch/palletizer_ui.launch.py start_frontend:=false
+```
+
+Para ver los comandos expandidos:
+
+```bash
+ros2 launch /home/felipe/proyecto/Esp32_paletizador/ui/launch/palletizer_ui.launch.py show_commands:=true
+```
+
+Antes de usar el launch por primera vez, instala dependencias del frontend desde
+WSL/Linux, no con Node de Windows:
+
+```bash
+cd /home/felipe/proyecto/Esp32_paletizador/ui/frontend
+npm install
+```
+
 ## Nota de estado
 
 El firmware actual expone solo una parte del grafo ROS para mantener estabilidad
@@ -73,3 +135,17 @@ desactivados: services, /palletizer/command, /palletizer/home_axis, /palletizer/
 
 La UI muestra esos controles secundarios, pero los deshabilita si el backend no
 detecta la entidad ROS correspondiente.
+
+## Modelo 3D
+
+La estructura para URDF/STL queda en:
+
+```text
+ui/frontend/public/robot_description/
+```
+
+La guia detallada esta en:
+
+```text
+ui/GUIA_MODELO_3D_REACT.md
+```
