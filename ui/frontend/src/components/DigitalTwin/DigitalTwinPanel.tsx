@@ -50,7 +50,19 @@ function targetFromState(state: PalletizerState): Target {
   };
 }
 
-function RobotTemplate({ current, target, limits }: { current: Target; target: Target; limits: AxisLimit[] }) {
+function RobotTemplate({
+  current,
+  target,
+  limits,
+  targetEditing,
+  onTargetSelect
+}: {
+  current: Target;
+  target: Target;
+  limits: AxisLimit[];
+  targetEditing: boolean;
+  onTargetSelect: () => void;
+}) {
   const xRange = limits[0].max - limits[0].min;
   const yRange = limits[1].max - limits[1].min;
   const zRange = limits[2].max - limits[2].min;
@@ -78,9 +90,16 @@ function RobotTemplate({ current, target, limits }: { current: Target; target: T
         <sphereGeometry args={[10, 24, 24]} />
         <meshStandardMaterial color="#187f45" />
       </mesh>
-      <mesh position={[target.x_mm, target.z_mm, target.y_mm]}>
+      <mesh
+        position={[target.x_mm, target.z_mm, target.y_mm]}
+        scale={targetEditing ? 1.35 : 1}
+        onPointerDown={(event: ThreeEvent<PointerEvent>) => {
+          event.stopPropagation();
+          onTargetSelect();
+        }}
+      >
         <sphereGeometry args={[9, 24, 24]} />
-        <meshStandardMaterial color="#d59a1a" emissive="#6d4600" emissiveIntensity={0.25} />
+        <meshStandardMaterial color="#d59a1a" emissive={targetEditing ? "#d59a1a" : "#6d4600"} emissiveIntensity={targetEditing ? 0.55 : 0.25} />
       </mesh>
       <mesh position={[target.x_mm, target.z_mm / 2, target.y_mm]}>
         <cylinderGeometry args={[2, 2, Math.max(target.z_mm, 1), 12]} />
@@ -114,23 +133,37 @@ function DragPlane({ target, limits, onTargetChange }: { target: Target; limits:
     <mesh
       position={[centerX, 0, centerY]}
       rotation={[-Math.PI / 2, 0, 0]}
-      onPointerDown={(event) => {
+      onPointerDown={(event: ThreeEvent<PointerEvent>) => {
         setDragging(true);
         update(event);
       }}
-      onPointerMove={(event) => {
+      onPointerMove={(event: ThreeEvent<PointerEvent>) => {
         if (dragging) update(event);
       }}
       onPointerUp={() => setDragging(false)}
       onPointerLeave={() => setDragging(false)}
     >
       <planeGeometry args={[xRange, yRange]} />
-      <meshBasicMaterial color="#e9eef3" transparent opacity={0.22} />
+      <meshBasicMaterial color="#e9eef3" transparent opacity={0.3} />
     </mesh>
   );
 }
 
-function Scene({ current, target, limits, onTargetChange }: { current: Target; target: Target; limits: AxisLimit[]; onTargetChange: (next: Target) => void }) {
+function Scene({
+  current,
+  target,
+  limits,
+  targetEditing,
+  onTargetSelect,
+  onTargetChange
+}: {
+  current: Target;
+  target: Target;
+  limits: AxisLimit[];
+  targetEditing: boolean;
+  onTargetSelect: () => void;
+  onTargetChange: (next: Target) => void;
+}) {
   const xRange = limits[0].max - limits[0].min;
   const yRange = limits[1].max - limits[1].min;
   const maxRange = Math.max(xRange, yRange, 250);
@@ -144,9 +177,9 @@ function Scene({ current, target, limits, onTargetChange }: { current: Target; t
       <directionalLight position={[250, 400, 200]} intensity={1.0} />
       <gridHelper args={[maxRange * 1.3, 24, "#9aa5b1", "#d4dae1"]} position={[centerX, -0.5, centerY]} />
       <axesHelper args={[80]} position={[limits[0].min, 0, limits[1].min]} />
-      <DragPlane target={target} limits={limits} onTargetChange={onTargetChange} />
-      <RobotTemplate current={current} target={target} limits={limits} />
-      <OrbitControls makeDefault target={[centerX, 60, centerY]} />
+      {targetEditing && <DragPlane target={target} limits={limits} onTargetChange={onTargetChange} />}
+      <RobotTemplate current={current} target={target} limits={limits} targetEditing={targetEditing} onTargetSelect={onTargetSelect} />
+      <OrbitControls makeDefault enabled={!targetEditing} target={[centerX, 60, centerY]} />
     </Canvas>
   );
 }
@@ -156,6 +189,7 @@ export function DigitalTwinPanel({ state, send }: Props) {
   const limits = useMemo(() => axisLimitsFromState(state), [state]);
   const current = targetFromState(state);
   const [target, setTarget] = useState<Target>(current);
+  const [targetEditing, setTargetEditing] = useState(false);
   const [speedMmS, setSpeedMmS] = useState(25);
   const [accelMmS2, setAccelMmS2] = useState(50);
   const [toleranceMm, setToleranceMm] = useState(1);
@@ -188,6 +222,7 @@ export function DigitalTwinPanel({ state, send }: Props) {
         timeout_ms: timeoutMs
       }
     });
+    setTargetEditing(false);
   };
 
   return (
@@ -198,9 +233,23 @@ export function DigitalTwinPanel({ state, send }: Props) {
       </div>
       <div className="twin-layout">
         <div className="twin-canvas" aria-label="Visualizacion 3D del paletizador">
-          <Scene current={current} target={target} limits={limits} onTargetChange={setTarget} />
+          <Scene
+            current={current}
+            target={target}
+            limits={limits}
+            targetEditing={targetEditing}
+            onTargetSelect={() => setTargetEditing(true)}
+            onTargetChange={setTarget}
+          />
         </div>
         <form className="twin-controls" onSubmit={submit}>
+          <div className="twin-mode-row">
+            <span className={targetEditing ? "edit-badge active" : "edit-badge"}>{targetEditing ? "Editando setpoint" : "Orbita camara"}</span>
+            <button className="secondary" type="button" onClick={() => setTargetEditing((currentMode) => !currentMode)}>
+              {targetEditing ? "Bloquear setpoint" : "Editar setpoint"}
+            </button>
+          </div>
+          <p className="twin-hint">Click en la esfera amarilla habilita el arrastre del setpoint. Fuera de ese modo, el mouse orienta la vista 3D.</p>
           <div className="twin-readout">
             <div><span>Actual X</span><strong>{mm(current.x_mm)}</strong></div>
             <div><span>Actual Y</span><strong>{mm(current.y_mm)}</strong></div>

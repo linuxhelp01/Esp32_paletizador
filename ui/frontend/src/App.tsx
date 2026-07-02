@@ -2,6 +2,7 @@ import { EventLog } from "./components/EventLog";
 import { DigitalTwinPanel } from "./components/DigitalTwin/DigitalTwinPanel";
 import { HomingControls } from "./components/HomingControls";
 import { JointStatePanel } from "./components/JointStatePanel";
+import { MotorStateDrawer } from "./components/MotorStateDrawer";
 import { MoveControl } from "./components/MoveControl";
 import { SafetyPanel } from "./components/SafetyPanel";
 import { ServiceControls } from "./components/ServiceControls";
@@ -29,6 +30,7 @@ export function App() {
           <EventLog events={events} />
         </aside>
       </div>
+      <MotorStateDrawer state={state} />
     </main>
   );
 }
