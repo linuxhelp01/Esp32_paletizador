@@ -43,9 +43,7 @@ http://localhost:5173
 
 El panel 3D usa `three`, `@react-three/fiber` y `@react-three/drei`.
 
-El target del extremo se controla con el raton sobre el plano de trabajo. Z,
-velocidad, aceleracion, tolerancia y timeout se ingresan con teclado. Al
-confirmar, el frontend envia el mismo comando WebSocket `move_xyz` al backend.
+Por defecto el mouse orienta la camara 3D. El target del extremo solo se controla despues de hacer click en la esfera amarilla del setpoint; en ese modo el plano permite arrastrar X/Y. Z, velocidad, aceleracion, tolerancia y timeout se ingresan con teclado. Al confirmar, el frontend envia el mismo comando WebSocket `move_xyz` al backend.
 
 Los archivos para el modelo real deben ir en:
 
@@ -61,3 +59,8 @@ Guia detallada:
 
 Si estas en WSL, usa Node/NPM instalado dentro de Ubuntu. No uses el `npm` de
 Windows sobre rutas `\\wsl.localhost\...`.
+
+
+## Documentacion acumulada
+
+La documentacion consolidada del proyecto esta en `../../README.md` y `../../docs/`.

@@ -26,7 +26,7 @@ WebSocket. El backend es un nodo ROS 2 `rclpy` que:
 - envia goals a `/palletizer/move_xyz`
 - deja preparados servicios y actions secundarios para cuando el firmware los exponga
 
-La interfaz incluye un panel de gemelo digital 3D. El panel actual usa una geometria plantilla y permite mover el target del extremo con el raton, ingresar Z, velocidad y aceleracion con teclado, y enviar el movimiento por `/palletizer/move_xyz`.
+La interfaz incluye un panel de gemelo digital 3D. El panel actual usa una geometria plantilla: por defecto el mouse orienta la camara, y solo despues de hacer click en la esfera amarilla se habilita el arrastre del setpoint X/Y. Z, velocidad, aceleracion, tolerancia y timeout se ingresan con teclado; el envio se realiza por `/palletizer/move_xyz`. Tambien existe una ventana deslizante para estados detallados de motores.
 
 ## Arranque
 
@@ -148,4 +148,12 @@ La guia detallada esta en:
 
 ```text
 ui/GUIA_MODELO_3D_REACT.md
+docs/GUIA_MODELO_3D_REACT.md
+```
+
+La documentacion acumulada para GitHub esta en:
+
+```text
+README.md
+docs/README.md
 ```

@@ -41,3 +41,8 @@ El frontend envia JSON:
 Los comandos de servicios y actions secundarios estan implementados, pero
 pueden responder `unavailable` si el firmware actual no los expone en el grafo
 ROS.
+
+
+## Documentacion acumulada
+
+La documentacion consolidada del proyecto esta en `../../README.md` y `../../docs/`.
