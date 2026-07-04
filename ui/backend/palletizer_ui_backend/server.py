@@ -44,7 +44,11 @@ except ImportError:
 
 
 AXIS_NAMES = ["X", "Y", "Z", "ALL", "A", "X1", "X2"]
-PALLETIZER_CONNECTION_STALE_MS = 2500
+PALLETIZER_CONNECTION_STALE_MS = int(os.environ.get("PALLETIZER_CONNECTION_STALE_MS", "5000"))
+ACTION_READY_TIMEOUT_SEC = float(os.environ.get("PALLETIZER_ACTION_READY_TIMEOUT_SEC", "0.02"))
+SERVICE_READY_TIMEOUT_SEC = float(os.environ.get("PALLETIZER_SERVICE_READY_TIMEOUT_SEC", "0.02"))
+PING_SERVICE_READY_TIMEOUT_SEC = float(os.environ.get("PALLETIZER_PING_SERVICE_READY_TIMEOUT_SEC", "0.02"))
+UI_STATE_MIN_PERIOD_MS = int(os.environ.get("PALLETIZER_UI_STATE_MIN_PERIOD_MS", "33"))
 
 
 def now_ms() -> int:
@@ -67,6 +71,9 @@ class PalletizerUiNode(Node):
         self._emit: Optional[Callable[[Dict[str, Any]], None]] = None
         self._lock = threading.Lock()
         self._last_seen_ms: Dict[str, int] = {}
+        self._last_state_emit_ms = 0
+        self._pending_actions: set[str] = set()
+        self._active_actions: set[str] = set()
         self._state: Dict[str, Any] = {
             "stamp_ms": now_ms(),
             "ros": {
@@ -106,6 +113,7 @@ class PalletizerUiNode(Node):
         self.create_subscription(String, "/palletizer/fault_state", self._on_fault_state, 10)
         self._emergency_pub = self.create_publisher(Bool, "/palletizer/emergency_stop", 10)
         self._command_pub = self.create_publisher(String, "/palletizer/command", 10)
+        self._fast_move_pub = self.create_publisher(Float32MultiArray, "/palletizer/fast_move_xyz", 10)
 
         self._move_client = ActionClient(self, MoveXYZ, "/palletizer/move_xyz")
         self._home_client = ActionClient(self, HomeAxis, "/palletizer/home_axis") if HomeAxis else None
@@ -178,6 +186,8 @@ class PalletizerUiNode(Node):
             self._publish_emergency(bool(message.get("data", True)))
         elif command_type == "move_xyz":
             self._send_move_goal(message.get("goal", {}))
+        elif command_type == "jog_xyz":
+            self._send_jog_command(message.get("goal", {}))
         elif command_type == "home_axis":
             self._send_home_goal(message.get("goal", {}))
         elif command_type == "go_origin":
@@ -258,7 +268,7 @@ class PalletizerUiNode(Node):
         report = self._ping_report(ping_id)
         self._send({"type": "ping_result", "ping": report, "state": self.snapshot()})
 
-        if GetDriverStatus is None or not self._get_driver_status_client or not self._get_driver_status_client.wait_for_service(timeout_sec=0.2):
+        if GetDriverStatus is None or not self._service_ready(self._get_driver_status_client, PING_SERVICE_READY_TIMEOUT_SEC):
             return
         future = self._get_driver_status_client.call_async(GetDriverStatus.Request())
         future.add_done_callback(lambda f: self._on_ping_driver_status(ping_id, f))
@@ -338,7 +348,31 @@ class PalletizerUiNode(Node):
     def _command_topic_ready(self) -> bool:
         return self._command_topic_subscribers() > 0
 
-    def _publish_command_text(self, command: str) -> None:
+    def _fast_move_subscribers(self) -> int:
+        return self.count_subscribers("/palletizer/fast_move_xyz")
+
+    def _fast_move_ready(self) -> bool:
+        return self._fast_move_subscribers() > 0
+
+    def _action_busy(self) -> bool:
+        with self._lock:
+            return bool(self._pending_actions or self._active_actions)
+
+    def _mark_action_pending(self, action: str) -> None:
+        with self._lock:
+            self._pending_actions.add(action)
+
+    def _mark_action_accepted(self, action: str) -> None:
+        with self._lock:
+            self._pending_actions.discard(action)
+            self._active_actions.add(action)
+
+    def _clear_action(self, action: str) -> None:
+        with self._lock:
+            self._pending_actions.discard(action)
+            self._active_actions.discard(action)
+
+    def _publish_command_text(self, command: str, command_name: str = "raw_command") -> None:
         command = command.strip()
         if not command:
             self._send({"type": "error", "message": "empty raw command"})
@@ -347,7 +381,7 @@ class PalletizerUiNode(Node):
         if subscribers <= 0:
             self._send({
                 "type": "command_unavailable",
-                "command": "raw_command",
+                "command": command_name,
                 "data": command,
                 "message": "no ROS subscriber on /palletizer/command",
             })
@@ -355,14 +389,76 @@ class PalletizerUiNode(Node):
         msg = String()
         msg.data = command
         self._command_pub.publish(msg)
-        self._send({"type": "command_ack", "command": "raw_command", "data": command, "subscribers": subscribers})
+        self._send({"type": "command_ack", "command": command_name, "data": command, "subscribers": subscribers})
+
+    def _service_ready(self, client: Any, timeout_sec: float = SERVICE_READY_TIMEOUT_SEC) -> bool:
+        if not client:
+            return False
+        if client.service_is_ready():
+            return True
+        return bool(client.wait_for_service(timeout_sec=timeout_sec))
+
+    def _action_ready(self, client: Any, timeout_sec: float = ACTION_READY_TIMEOUT_SEC) -> bool:
+        if not client:
+            return False
+        if client.server_is_ready():
+            return True
+        return bool(client.wait_for_server(timeout_sec=timeout_sec))
+
+    def _send_jog_command(self, payload: Dict[str, Any]) -> None:
+        if self._action_busy():
+            self._send({
+                "type": "command_rejected",
+                "command": "jog_xyz",
+                "message": "action active; wait for result or stop before manual jog",
+            })
+            return
+        if self._fast_move_ready():
+            msg = Float32MultiArray()
+            msg.data = [
+                float(payload.get("x_mm", 0.0)),
+                float(payload.get("y_mm", 0.0)),
+                float(payload.get("z_mm", 0.0)),
+                float(payload.get("speed_mm_s", 25.0)),
+                float(payload.get("accel_mm_s2", 50.0)),
+            ]
+            self._fast_move_pub.publish(msg)
+            self._send({
+                "type": "command_ack",
+                "command": "jog_xyz",
+                "transport": "fast_move_xyz",
+                "data": msg.data,
+                "subscribers": self._fast_move_subscribers(),
+            })
+            return
+        command = (
+            f"POSXYZ {float(payload.get('x_mm', 0.0)):.3f} "
+            f"{float(payload.get('y_mm', 0.0)):.3f} "
+            f"{float(payload.get('z_mm', 0.0)):.3f} "
+            f"{float(payload.get('speed_mm_s', 25.0)):.3f} "
+            f"{float(payload.get('accel_mm_s2', 50.0)):.3f}"
+        )
+        if self._command_topic_ready():
+            self._publish_command_text(command, "jog_xyz")
+            return
+        self._send({"type": "command_unavailable", "command": "jog_xyz", "fallback": "move_xyz"})
+        self._send_move_goal(payload)
 
     def _call_set_gripper(self, payload: Dict[str, Any]) -> None:
         closed = bool(payload.get("closed", True))
-        if SetGripper is None or not self._set_gripper_client or not self._set_gripper_client.wait_for_service(timeout_sec=0.2):
+        if SetGripper is None or not self._set_gripper_client:
             self._send({"type": "service_unavailable", "service": "set_gripper", "fallback": "raw_command"})
             self._publish_command_text("SERVO 0" if closed else "SERVO 180")
             return
+        if not self._set_gripper_client.service_is_ready():
+            if self._command_topic_ready():
+                self._send({"type": "service_unavailable", "service": "set_gripper", "fallback": "raw_command"})
+                self._publish_command_text("SERVO 0" if closed else "SERVO 180")
+                return
+            if not self._service_ready(self._set_gripper_client):
+                self._send({"type": "service_unavailable", "service": "set_gripper", "fallback": "raw_command"})
+                self._publish_command_text("SERVO 0" if closed else "SERVO 180")
+                return
         request = SetGripper.Request()
         request.closed = closed
         self._call_service("set_gripper", self._set_gripper_client, request)
@@ -377,7 +473,7 @@ class PalletizerUiNode(Node):
         self._publish_command_text(f"SERVO {float(payload.get('angle_deg', 90.0)):.1f}")
 
     def _send_move_goal(self, payload: Dict[str, Any]) -> None:
-        if not self._move_client.wait_for_server(timeout_sec=0.2):
+        if not self._action_ready(self._move_client):
             self._send({"type": "action_unavailable", "action": "move_xyz"})
             return
 
@@ -395,12 +491,13 @@ class PalletizerUiNode(Node):
         goal.angular_tolerance_deg = float(payload.get("angular_tolerance_deg", 1.0))
         goal.timeout_ms = int(payload.get("timeout_ms", 30000))
         self._send({"type": "action_goal_sent", "action": "move_xyz", "goal": payload})
+        self._mark_action_pending("move_xyz")
         future = self._move_client.send_goal_async(goal, feedback_callback=self._on_move_feedback)
         future.add_done_callback(lambda f: self._on_action_goal_response("move_xyz", f))
 
     def _send_home_goal(self, payload: Dict[str, Any]) -> None:
         axis = int(payload.get("axis", 0))
-        if not self._home_client or HomeAxis is None or not self._home_client.wait_for_server(timeout_sec=0.2):
+        if HomeAxis is None or not self._action_ready(self._home_client):
             axis_name = self._axis_name(axis)
             self._send({"type": "action_unavailable", "action": "home_axis", "fallback": "raw_command"})
             if axis_name != "UNKNOWN":
@@ -416,12 +513,13 @@ class PalletizerUiNode(Node):
         goal.slow_rpm = float(payload.get("slow_rpm", 80.0))
         goal.timeout_ms = int(payload.get("timeout_ms", 120000))
         self._send({"type": "action_goal_sent", "action": "home_axis", "goal": payload})
+        self._mark_action_pending("home_axis")
         future = self._home_client.send_goal_async(goal, feedback_callback=self._on_home_feedback)
         future.add_done_callback(lambda f: self._on_action_goal_response("home_axis", f))
 
     def _send_origin_goal(self, payload: Dict[str, Any]) -> None:
         axis = int(payload.get("axis", 0))
-        if not self._origin_client or GoOrigin is None or not self._origin_client.wait_for_server(timeout_sec=0.2):
+        if GoOrigin is None or not self._action_ready(self._origin_client):
             axis_name = self._axis_name(axis)
             self._send({"type": "action_unavailable", "action": "go_origin", "fallback": "raw_command"})
             if axis_name != "UNKNOWN":
@@ -433,6 +531,7 @@ class PalletizerUiNode(Node):
         goal.tolerance_mm = float(payload.get("tolerance_mm", 1.0))
         goal.timeout_ms = int(payload.get("timeout_ms", 30000))
         self._send({"type": "action_goal_sent", "action": "go_origin", "goal": payload})
+        self._mark_action_pending("go_origin")
         future = self._origin_client.send_goal_async(goal, feedback_callback=self._on_origin_feedback)
         future.add_done_callback(lambda f: self._on_action_goal_response("go_origin", f))
 
@@ -440,11 +539,14 @@ class PalletizerUiNode(Node):
         try:
             goal_handle = future.result()
         except Exception as exc:
+            self._clear_action(action)
             self._send({"type": "action_error", "action": action, "message": str(exc)})
             return
         if not goal_handle.accepted:
+            self._clear_action(action)
             self._send({"type": "action_rejected", "action": action})
             return
+        self._mark_action_accepted(action)
         self._send({"type": "action_accepted", "action": action})
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(lambda f: self._on_action_result(action, f))
@@ -455,13 +557,15 @@ class PalletizerUiNode(Node):
             result = response.result
             status = int(response.status)
         except Exception as exc:
+            self._clear_action(action)
             self._send({"type": "action_error", "action": action, "message": str(exc)})
             return
         payload = {"type": "action_result", "action": action, "status": status, "result": self._action_result_dict(action, result)}
         with self._lock:
             self._state["last_action"] = payload
+        self._clear_action(action)
         self._send(payload)
-        self._send_state()
+        self._send_state(force=True)
 
     def _on_move_feedback(self, feedback_msg: Any) -> None:
         feedback = feedback_msg.feedback
@@ -528,7 +632,7 @@ class PalletizerUiNode(Node):
     def _call_enable_axis(self, payload: Dict[str, Any]) -> None:
         axis = int(payload.get("axis", 3))
         enable = bool(payload.get("enable", True))
-        if EnableAxis is None or not self._enable_axis_client or not self._enable_axis_client.wait_for_service(timeout_sec=0.2):
+        if EnableAxis is None or not self._service_ready(self._enable_axis_client):
             axis_name = self._axis_name(axis)
             self._send({"type": "service_unavailable", "service": "enable_axis", "fallback": "raw_command"})
             if axis_name != "UNKNOWN":
@@ -571,7 +675,7 @@ class PalletizerUiNode(Node):
         self._call_service(name, client, request)
 
     def _call_service(self, name: str, client: Any, request: Any) -> None:
-        if not client or request is None or not client.wait_for_service(timeout_sec=0.2):
+        if request is None or not self._service_ready(client):
             self._send({"type": "service_unavailable", "service": name})
             return
         future = client.call_async(request)
@@ -634,10 +738,16 @@ class PalletizerUiNode(Node):
             "release_stall": self._release_stall_client.service_is_ready() if self._release_stall_client else False,
             "get_driver_status": self._get_driver_status_client.service_is_ready() if self._get_driver_status_client else False,
             "command_topic": self._command_topic_ready(),
+            "fast_move_topic": self._fast_move_ready(),
+            "fast_jog": (self._fast_move_ready() or self._command_topic_ready()) and not self._action_busy(),
             "aux_servo": (self._set_gripper_client.service_is_ready() if self._set_gripper_client else False) or self._command_topic_ready(),
         }
 
-    def _send_state(self) -> None:
+    def _send_state(self, force: bool = False) -> None:
+        now = now_ms()
+        if not force and now - self._last_state_emit_ms < UI_STATE_MIN_PERIOD_MS:
+            return
+        self._last_state_emit_ms = now
         self._send({"type": "state", "state": self.snapshot()})
 
     def _send(self, payload: Dict[str, Any]) -> None:
@@ -649,6 +759,7 @@ class WebSocketPeer:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.reader = reader
         self.writer = writer
+        self._send_lock = asyncio.Lock()
 
     async def handshake(self) -> bool:
         request = await self.reader.readuntil(b"\r\n\r\n")
@@ -674,19 +785,20 @@ class WebSocketPeer:
         return True
 
     async def send_json(self, payload: Dict[str, Any]) -> None:
-        data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-        header = bytearray([0x81])
-        length = len(data)
-        if length < 126:
-            header.append(length)
-        elif length < 65536:
-            header.append(126)
-            header.extend(struct.pack("!H", length))
-        else:
-            header.append(127)
-            header.extend(struct.pack("!Q", length))
-        self.writer.write(bytes(header) + data)
-        await self.writer.drain()
+        async with self._send_lock:
+            data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            header = bytearray([0x81])
+            length = len(data)
+            if length < 126:
+                header.append(length)
+            elif length < 65536:
+                header.append(126)
+                header.extend(struct.pack("!H", length))
+            else:
+                header.append(127)
+                header.extend(struct.pack("!Q", length))
+            self.writer.write(bytes(header) + data)
+            await self.writer.drain()
 
     async def read_json(self) -> Optional[Dict[str, Any]]:
         first = await self.reader.readexactly(2)
@@ -764,6 +876,8 @@ class WebSocketServer:
         self.loop.call_soon_threadsafe(lambda: asyncio.create_task(self.broadcast(payload)))
 
     async def broadcast(self, payload: Dict[str, Any]) -> None:
+        if not self.peers:
+            return
         stale = []
         for peer in list(self.peers):
             try:

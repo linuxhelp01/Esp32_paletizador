@@ -41,6 +41,8 @@ static rcl_init_options_t initOptions;
 static rclc_support_t support;
 static rcl_node_t node;
 static rcl_timer_t telemetryTimer;
+static rcl_timer_t statusTelemetryTimer;
+static rcl_timer_t actionTimer;
 static rclc_executor_t executor;
 
 static rcl_publisher_t jointStatePublisher;
@@ -50,6 +52,7 @@ static rcl_publisher_t statusPublisher;
 static rcl_publisher_t faultPublisher;
 static rcl_subscription_t emergencyStopSubscriber;
 static rcl_subscription_t commandSubscriber;
+static rcl_subscription_t fastMoveSubscriber;
 static rcl_service_t enableAxisService;
 static rcl_service_t setZeroService;
 static rcl_service_t setAxisLimitsService;
@@ -68,6 +71,7 @@ static std_msgs__msg__String statusMsg;
 static std_msgs__msg__String faultMsg;
 static std_msgs__msg__Bool emergencyStopMsg;
 static std_msgs__msg__String commandMsg;
+static std_msgs__msg__Float32MultiArray fastMoveMsg;
 static palletizer_msgs__srv__EnableAxis_Request enableAxisRequest;
 static palletizer_msgs__srv__EnableAxis_Response enableAxisResponse;
 static palletizer_msgs__srv__SetZero_Request setZeroRequest;
@@ -98,6 +102,7 @@ static double jointVelocities[ROBOT_MOTOR_COUNT];
 static double jointEfforts[ROBOT_MOTOR_COUNT];
 static float axisPositionsMm[ROBOT_LINEAR_AXIS_COUNT];
 static float motorRpms[ROBOT_MOTOR_COUNT];
+static float fastMoveData[5];
 static char statusBuffer[2300];
 static char faultBuffer[96];
 static char commandBuffer[128];
@@ -114,9 +119,12 @@ static char originResultMessageBuffer[96];
 static char frameIdBuffer[] = "palletizer_base";
 static char jointNameBuffers[ROBOT_MOTOR_COUNT][4] = {"X1", "X2", "Y", "Z", "A"};
 
-static constexpr size_t ROS_EXECUTOR_TIMERS = 1;
+static constexpr size_t ROS_EXECUTOR_TIMERS = 3;
 static constexpr bool ROS_ENABLE_COMMAND_SUBSCRIBER = true;
-static constexpr size_t ROS_EXECUTOR_SUBSCRIPTIONS = ROS_ENABLE_COMMAND_SUBSCRIBER ? 2 : 1;
+static constexpr bool ROS_ENABLE_FAST_MOVE_SUBSCRIBER = true;
+static constexpr size_t ROS_EXECUTOR_SUBSCRIPTIONS = 1 +
+                                                       (ROS_ENABLE_COMMAND_SUBSCRIBER ? 1 : 0) +
+                                                       (ROS_ENABLE_FAST_MOVE_SUBSCRIBER ? 1 : 0);
 static constexpr bool ROS_ENABLE_SERVICE_SERVERS = false;
 static constexpr bool ROS_ENABLE_GRIPPER_SERVICE = true;
 static constexpr bool ROS_ENABLE_EXTENDED_SERVICE_SERVERS = false;
@@ -140,6 +148,8 @@ static bool supportInitialized = false;
 static bool nodeInitialized = false;
 static bool executorInitialized = false;
 static bool telemetryTimerInitialized = false;
+static bool statusTelemetryTimerInitialized = false;
+static bool actionTimerInitialized = false;
 static bool jointStatePublisherInitialized = false;
 static bool axisPositionPublisherInitialized = false;
 static bool motorRpmPublisherInitialized = false;
@@ -147,6 +157,7 @@ static bool statusPublisherInitialized = false;
 static bool faultPublisherInitialized = false;
 static bool emergencyStopSubscriberInitialized = false;
 static bool commandSubscriberInitialized = false;
+static bool fastMoveSubscriberInitialized = false;
 static bool enableAxisServiceInitialized = false;
 static bool setZeroServiceInitialized = false;
 static bool setAxisLimitsServiceInitialized = false;
@@ -218,6 +229,8 @@ static void zeroRosHandles() {
   support = {};
   node = rcl_get_zero_initialized_node();
   telemetryTimer = rcl_get_zero_initialized_timer();
+  statusTelemetryTimer = rcl_get_zero_initialized_timer();
+  actionTimer = rcl_get_zero_initialized_timer();
   executor = rclc_executor_get_zero_initialized_executor();
   jointStatePublisher = rcl_get_zero_initialized_publisher();
   axisPositionPublisher = rcl_get_zero_initialized_publisher();
@@ -226,6 +239,7 @@ static void zeroRosHandles() {
   faultPublisher = rcl_get_zero_initialized_publisher();
   emergencyStopSubscriber = rcl_get_zero_initialized_subscription();
   commandSubscriber = rcl_get_zero_initialized_subscription();
+  fastMoveSubscriber = rcl_get_zero_initialized_subscription();
   enableAxisService = rcl_get_zero_initialized_service();
   setZeroService = rcl_get_zero_initialized_service();
   setAxisLimitsService = rcl_get_zero_initialized_service();
@@ -262,6 +276,8 @@ static void resetRosInitFlags() {
   nodeInitialized = false;
   executorInitialized = false;
   telemetryTimerInitialized = false;
+  statusTelemetryTimerInitialized = false;
+  actionTimerInitialized = false;
   jointStatePublisherInitialized = false;
   axisPositionPublisherInitialized = false;
   motorRpmPublisherInitialized = false;
@@ -269,6 +285,7 @@ static void resetRosInitFlags() {
   faultPublisherInitialized = false;
   emergencyStopSubscriberInitialized = false;
   commandSubscriberInitialized = false;
+  fastMoveSubscriberInitialized = false;
   enableAxisServiceInitialized = false;
   setZeroServiceInitialized = false;
   setAxisLimitsServiceInitialized = false;
@@ -296,6 +313,7 @@ static void disconnectRosBridge() {
   if (setAxisLimitsServiceInitialized) ignoreRclRet(rcl_service_fini(&setAxisLimitsService, &node));
   if (setZeroServiceInitialized) ignoreRclRet(rcl_service_fini(&setZeroService, &node));
   if (enableAxisServiceInitialized) ignoreRclRet(rcl_service_fini(&enableAxisService, &node));
+  if (fastMoveSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&fastMoveSubscriber, &node));
   if (commandSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&commandSubscriber, &node));
   if (emergencyStopSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&emergencyStopSubscriber, &node));
   if (faultPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&faultPublisher, &node));
@@ -303,6 +321,8 @@ static void disconnectRosBridge() {
   if (motorRpmPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&motorRpmPublisher, &node));
   if (axisPositionPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&axisPositionPublisher, &node));
   if (jointStatePublisherInitialized) ignoreRclRet(rcl_publisher_fini(&jointStatePublisher, &node));
+  if (actionTimerInitialized) ignoreRclRet(rcl_timer_fini(&actionTimer));
+  if (statusTelemetryTimerInitialized) ignoreRclRet(rcl_timer_fini(&statusTelemetryTimer));
   if (telemetryTimerInitialized) ignoreRclRet(rcl_timer_fini(&telemetryTimer));
   if (nodeInitialized) ignoreRclRet(rcl_node_fini(&node));
   if (supportInitialized) ignoreRclRet(rclc_support_fini(&support));
@@ -326,7 +346,7 @@ static void writeString(rosidl_runtime_c__String &text, char *buffer, size_t cap
   text.size = written > 0 ? min(static_cast<size_t>(written), capacity - 1) : 0;
 }
 
-static bool waitControlCommand(uint32_t commandId, bool &accepted, uint32_t timeoutMs = 100) {
+static bool waitControlCommand(uint32_t commandId, bool &accepted, uint32_t timeoutMs = ROS_SERVICE_ACCEPT_WAIT_MS) {
   const uint32_t start = millis();
   do {
     bool known = false;
@@ -962,13 +982,20 @@ static void fillTelemetryMessages() {
 
 static void processActions();
 
-static void publishTelemetry(rcl_timer_t *, int64_t) {
+static void publishFastTelemetry(rcl_timer_t *, int64_t) {
   fillTelemetryMessages();
   ignoreRclRet(rcl_publish(&jointStatePublisher, &jointStateMsg, nullptr));
   ignoreRclRet(rcl_publish(&axisPositionPublisher, &axisPositionMsg, nullptr));
+}
+
+static void publishStatusTelemetry(rcl_timer_t *, int64_t) {
+  fillTelemetryMessages();
   ignoreRclRet(rcl_publish(&motorRpmPublisher, &motorRpmMsg, nullptr));
   ignoreRclRet(rcl_publish(&statusPublisher, &statusMsg, nullptr));
   ignoreRclRet(rcl_publish(&faultPublisher, &faultMsg, nullptr));
+}
+
+static void processActionTimer(rcl_timer_t *, int64_t) {
   processActions();
 }
 
@@ -1051,6 +1078,22 @@ static void onCommand(const void *msgIn) {
   memcpy(commandBuffer, msg->data.data, size);
   commandBuffer[size] = '\0';
   robotRequestCommandText(commandBuffer);
+}
+
+static void onFastMove(const void *msgIn) {
+  const auto *msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msgIn);
+  if (!msg->data.data || msg->data.size < 3) return;
+
+  uint32_t commandId = 0;
+  const float speedMmS = msg->data.size > 3 ? msg->data.data[3] : 0.0f;
+  const float accelMmS2 = msg->data.size > 4 ? msg->data.data[4] : 0.0f;
+  robotRequestMoveXYZMm(
+      msg->data.data[0],
+      msg->data.data[1],
+      msg->data.data[2],
+      speedMmS,
+      accelMmS2,
+      commandId);
 }
 
 static void finishCommandService(bool queued, uint32_t commandId, bool &success, rosidl_runtime_c__String &message, char *buffer, size_t capacity) {
@@ -1338,6 +1381,14 @@ static void initMessages() {
   motorRpmMsg.data.size = ROBOT_MOTOR_COUNT;
   motorRpmMsg.data.capacity = ROBOT_MOTOR_COUNT;
 
+  fastMoveMsg.layout.dim.size = 0;
+  fastMoveMsg.layout.dim.capacity = 0;
+  fastMoveMsg.layout.dim.data = nullptr;
+  fastMoveMsg.layout.data_offset = 0;
+  fastMoveMsg.data.data = fastMoveData;
+  fastMoveMsg.data.size = 0;
+  fastMoveMsg.data.capacity = 5;
+
   setString(statusMsg.data, statusBuffer, sizeof(statusBuffer));
   setString(faultMsg.data, faultBuffer, sizeof(faultBuffer));
   setString(commandMsg.data, commandBuffer, sizeof(commandBuffer));
@@ -1489,6 +1540,16 @@ bool beginRosBridge() {
     }
     commandSubscriberInitialized = true;
   }
+  if (ROS_ENABLE_FAST_MOVE_SUBSCRIBER) {
+    if (!check(rclc_subscription_init_best_effort(
+            &fastMoveSubscriber, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+            "/palletizer/fast_move_xyz"))) {
+      disconnectRosBridge();
+      return false;
+    }
+    fastMoveSubscriberInitialized = true;
+  }
 
   if (ROS_ENABLE_GRIPPER_SERVICE) {
     if (!check(rclc_service_init_default(
@@ -1560,27 +1621,50 @@ bool beginRosBridge() {
   if (!check(rclc_timer_init_default(
           &telemetryTimer,
           &support,
-          RCL_MS_TO_NS(50),
-          publishTelemetry))) {
+          RCL_MS_TO_NS(ROS_FAST_TELEMETRY_PERIOD_MS),
+          publishFastTelemetry))) {
     disconnectRosBridge();
     return false;
   }
   telemetryTimerInitialized = true;
+  if (!check(rclc_timer_init_default(
+          &statusTelemetryTimer,
+          &support,
+          RCL_MS_TO_NS(ROS_STATUS_TELEMETRY_PERIOD_MS),
+          publishStatusTelemetry))) {
+    disconnectRosBridge();
+    return false;
+  }
+  statusTelemetryTimerInitialized = true;
+  if (!check(rclc_timer_init_default(
+          &actionTimer,
+          &support,
+          RCL_MS_TO_NS(ACTION_PROCESS_PERIOD_MS),
+          processActionTimer))) {
+    disconnectRosBridge();
+    return false;
+  }
+  actionTimerInitialized = true;
 
   if (!check(rclc_executor_init(&executor, &support.context, ROS_EXECUTOR_HANDLES, &allocator))) {
     disconnectRosBridge();
     return false;
   }
   executorInitialized = true;
-  if (!check(rclc_executor_add_timer(&executor, &telemetryTimer))) {
-    disconnectRosBridge();
-    return false;
-  }
   if (!check(rclc_executor_add_subscription(
           &executor,
           &emergencyStopSubscriber,
           &emergencyStopMsg,
           onEmergencyStop,
+          ON_NEW_DATA))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (ROS_ENABLE_FAST_MOVE_SUBSCRIBER && !check(rclc_executor_add_subscription(
+          &executor,
+          &fastMoveSubscriber,
+          &fastMoveMsg,
+          onFastMove,
           ON_NEW_DATA))) {
     disconnectRosBridge();
     return false;
@@ -1617,17 +1701,7 @@ bool beginRosBridge() {
     return false;
   }
   if (ROS_ENABLE_HOME_ORIGIN_ACTIONS) {
-    if (ROS_ENABLE_GRIPPER_SERVICE && setGripperServiceInitialized &&
-      !check(rclc_executor_add_service(
-          &executor,
-          &setGripperService,
-          &setGripperRequest,
-          &setGripperResponse,
-          onSetGripperService))) {
-    disconnectRosBridge();
-    return false;
-  }
-  if (!check(rclc_executor_add_action_server(
+    if (!check(rclc_executor_add_action_server(
             &executor,
             &homeActionServer,
             1,
@@ -1639,17 +1713,7 @@ bool beginRosBridge() {
       disconnectRosBridge();
       return false;
     }
-    if (ROS_ENABLE_GRIPPER_SERVICE && setGripperServiceInitialized &&
-      !check(rclc_executor_add_service(
-          &executor,
-          &setGripperService,
-          &setGripperRequest,
-          &setGripperResponse,
-          onSetGripperService))) {
-    disconnectRosBridge();
-    return false;
-  }
-  if (!check(rclc_executor_add_action_server(
+    if (!check(rclc_executor_add_action_server(
             &executor,
             &originActionServer,
             1,
@@ -1720,6 +1784,19 @@ bool beginRosBridge() {
           &getDriverStatusRequest,
           &getDriverStatusResponse,
           onGetDriverStatusService))) {
+    disconnectRosBridge();
+    return false;
+  }
+
+  if (!check(rclc_executor_add_timer(&executor, &actionTimer))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_timer(&executor, &telemetryTimer))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_timer(&executor, &statusTelemetryTimer))) {
     disconnectRosBridge();
     return false;
   }

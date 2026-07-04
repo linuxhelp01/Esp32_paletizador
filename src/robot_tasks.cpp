@@ -256,14 +256,14 @@ static void controlTask(void *) {
       stopAllMotors();
     }
 
-    pollEncoders();
-    drainCanReplies();
-    serviceMachine();
-
     RobotCommand command;
     while (robotCommandQueue && xQueueReceive(robotCommandQueue, &command, 0) == pdTRUE) {
       processRobotCommand(command);
     }
+
+    pollEncoders();
+    drainCanReplies();
+    serviceMachine();
 
     publishSnapshot();
     vTaskDelay(pdMS_TO_TICKS(CONTROL_TASK_PERIOD_MS));

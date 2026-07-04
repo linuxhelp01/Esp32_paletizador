@@ -57,22 +57,25 @@ static constexpr size_t MICRO_ROS_DOMAIN_ID = 10;
 static constexpr BaseType_t CONTROL_TASK_CORE = 1;
 static constexpr BaseType_t ROS_TASK_CORE = 0;
 static constexpr UBaseType_t CONTROL_TASK_PRIORITY = 4;
-static constexpr UBaseType_t ROS_TASK_PRIORITY = 2;
+static constexpr UBaseType_t ROS_TASK_PRIORITY = 3;
 static constexpr uint32_t CONTROL_TASK_STACK_BYTES = 8192;
 static constexpr uint32_t ROS_TASK_STACK_BYTES = 16384;
 static constexpr uint32_t CONTROL_TASK_PERIOD_MS = 1;
 static constexpr uint32_t ROS_TASK_PERIOD_MS = 1;
-static constexpr uint8_t ROBOT_COMMAND_QUEUE_LENGTH = 4;
+static constexpr uint8_t ROBOT_COMMAND_QUEUE_LENGTH = 8;
 static constexpr uint32_t MICRO_ROS_RECONNECT_PERIOD_MS = 1000;
 static constexpr uint32_t MICRO_ROS_HEALTH_CHECK_PERIOD_MS = 5000;
 static constexpr int MICRO_ROS_PING_TIMEOUT_MS = 100;
 static constexpr uint8_t MICRO_ROS_PING_ATTEMPTS = 3;
 static constexpr int MICRO_ROS_ENTITY_CREATION_TIMEOUT_MS = 15000;
 static constexpr int MICRO_ROS_ENTITY_DESTROY_TIMEOUT_MS = 15000;
-static constexpr uint32_t ACTION_PROCESS_PERIOD_MS = 10;
-static constexpr uint32_t ACTION_FEEDBACK_PERIOD_MS = 50;
+static constexpr uint32_t ACTION_PROCESS_PERIOD_MS = 5;
+static constexpr uint32_t ACTION_FEEDBACK_PERIOD_MS = 20;
 static constexpr float ACTION_RESULT_MIN_TOLERANCE_MM = 1.0f;
-static constexpr uint32_t ACTION_RESULT_POSITION_STABLE_MS = 100;
+static constexpr uint32_t ACTION_RESULT_POSITION_STABLE_MS = 50;
+static constexpr uint32_t ROS_FAST_TELEMETRY_PERIOD_MS = 50;
+static constexpr uint32_t ROS_STATUS_TELEMETRY_PERIOD_MS = 250;
+static constexpr uint32_t ROS_SERVICE_ACCEPT_WAIT_MS = 5;
 
 // Homing MKS 0x91/0x90. Los valores de trigger/direccion/limite dependen del
 // cableado fisico de los finales de carrera. Los defaults replican el ejemplo

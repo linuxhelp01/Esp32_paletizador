@@ -45,7 +45,8 @@ export function JogControl({ state, send }: Props) {
   const [stepMm, setStepMm] = useState(5);
   const [speedMmS, setSpeedMmS] = useState(25);
   const [accelMmS2, setAccelMmS2] = useState(50);
-  const available = Boolean(state.availability.move_xyz);
+  const fastJogAvailable = Boolean(state.availability.fast_jog);
+  const available = Boolean(fastJogAvailable || state.availability.move_xyz);
   const gripperAvailable = Boolean(state.availability.set_gripper || state.availability.aux_servo || state.availability.command_topic);
   const limits = axisLimitsFromState(state);
 
@@ -55,7 +56,7 @@ export function JogControl({ state, send }: Props) {
     const nextZ = clamp(currentAxis(state, 2) + dzMm, limits[2].min, limits[2].max);
 
     send({
-      type: "move_xyz",
+      type: fastJogAvailable ? "jog_xyz" : "move_xyz",
       goal: {
         x_mm: nextX,
         y_mm: nextY,
@@ -81,7 +82,7 @@ export function JogControl({ state, send }: Props) {
     <section className="section jog-control">
       <div className="section-heading">
         <h2>Controles manuales</h2>
-        <span>{available ? "jog habilitado" : "sin action"}</span>
+        <span>{fastJogAvailable ? "jog rapido" : available ? "jog por action" : "sin jog"}</span>
       </div>
 
       <div className="jog-layout">
