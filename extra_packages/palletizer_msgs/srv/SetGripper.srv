@@ -1,0 +1,9 @@
+# Open-loop binary gripper command driven by the auxiliary PWM servo.
+# closed=true maps to the take/close position. closed=false maps to release/open.
+bool closed
+---
+bool success
+string message
+bool closed
+float32 angle_deg
+uint16 pulse_us

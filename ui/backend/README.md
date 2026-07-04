@@ -33,7 +33,7 @@ ros2 run palletizer_ui_backend palletizer_ui_backend
 El frontend envia JSON:
 
 ```json
-{"type":"move_xyz","goal":{"x_mm":50,"y_mm":50,"z_mm":20,"speed_mm_s":25,"accel_mm_s2":50,"tolerance_mm":1,"timeout_ms":30000}}
+{"type":"move_xyz","goal":{"x_mm":50,"y_mm":50,"z_mm":20,"use_a":true,"a_deg":90,"speed_mm_s":25,"accel_mm_s2":50,"angular_speed_deg_s":90,"angular_accel_deg_s2":180,"tolerance_mm":1,"angular_tolerance_deg":1,"timeout_ms":30000}}
 {"type":"emergency_stop","data":true}
 {"type":"refresh"}
 ```

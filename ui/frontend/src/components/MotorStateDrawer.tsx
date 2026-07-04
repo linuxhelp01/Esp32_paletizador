@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { asBoolText, mm, rpm } from "../lib/format";
+import { asBoolText, deg, mm, rpm } from "../lib/format";
 import { PalletizerState } from "../lib/types";
 
-const motorLabels = ["X1", "X2", "Y", "Z"];
+const motorLabels = ["X1", "X2", "Y", "Z", "A"];
+const motorEnableAxes = [5, 6, 1, 2, 4];
 
 function numberArray(value: unknown): number[] {
   return Array.isArray(value) ? value.map((item) => Number(item ?? 0)) : [];
@@ -18,9 +19,10 @@ function statusText(value: unknown, okText = "OK", badText = "N/D") {
 
 type Props = {
   state: PalletizerState;
+  send: (payload: Record<string, unknown>) => void;
 };
 
-export function MotorStateDrawer({ state }: Props) {
+export function MotorStateDrawer({ state, send }: Props) {
   const [open, setOpen] = useState(false);
   const status = state.status;
   const online = valueArray(status.online);
@@ -36,6 +38,12 @@ export function MotorStateDrawer({ state }: Props) {
   const moveStatus = valueArray(status.moveStatus);
   const home91 = valueArray(status.home91);
   const home3B = valueArray(status.home3B);
+  const units = valueArray(status.units);
+  const canEnable = Boolean(state.availability.enable_axis || state.availability.command_topic);
+
+  const setMotorEnable = (axis: number, enable: boolean) => {
+    send({ type: "enable_axis", request: { axis, enable } });
+  };
 
   return (
     <>
@@ -61,12 +69,30 @@ export function MotorStateDrawer({ state }: Props) {
                   <strong>{motor}</strong>
                   <span className={enabled[index] ? "state-dot on" : "state-dot"}>{enabled[index] ? "ON" : "OFF"}</span>
                 </div>
+                <div className="motor-action-row">
+                  <button
+                    className="secondary"
+                    type="button"
+                    disabled={!canEnable || Boolean(enabled[index])}
+                    onClick={() => setMotorEnable(motorEnableAxes[index], true)}
+                  >
+                    Habilitar
+                  </button>
+                  <button
+                    className="secondary"
+                    type="button"
+                    disabled={!canEnable || !Boolean(enabled[index])}
+                    onClick={() => setMotorEnable(motorEnableAxes[index], false)}
+                  >
+                    Eje libre
+                  </button>
+                </div>
                 <dl>
                   <div><dt>Online</dt><dd>{statusText(online[index])}</dd></div>
                   <div><dt>Enable valido</dt><dd>{asBoolText(enabledOk[index])}</dd></div>
                   <div><dt>Stall</dt><dd>{stalled[index] ? "SI" : "No"}</dd></div>
-                  <div><dt>Posicion</dt><dd>{mm(positionMm[index])}</dd></div>
-                  <div><dt>Velocidad</dt><dd>{mm(velocityMmS[index])}/s</dd></div>
+                  <div><dt>Posicion</dt><dd>{units[index] === "deg" ? deg(positionMm[index]) : mm(positionMm[index])}</dd></div>
+                  <div><dt>Velocidad</dt><dd>{units[index] === "deg" ? `${deg(velocityMmS[index])}/s` : `${mm(velocityMmS[index])}/s`}</dd></div>
                   <div><dt>RPM</dt><dd>{rpm(rpmValue)}</dd></div>
                   <div><dt>Encoder 0x31</dt><dd>{Number(enc31[index] ?? 0).toFixed(0)}</dd></div>
                   <div><dt>Encoder 0x35</dt><dd>{Number(raw35[index] ?? 0).toFixed(0)}</dd></div>

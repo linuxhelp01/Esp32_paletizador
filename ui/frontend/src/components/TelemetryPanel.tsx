@@ -1,8 +1,8 @@
-import { mm, rpm } from "../lib/format";
+import { deg, mm, rpm } from "../lib/format";
 import { PalletizerState } from "../lib/types";
 
 const axisLabels = ["X", "Y", "Z"];
-const motorLabels = ["X1", "X2", "Y", "Z"];
+const motorLabels = ["X1", "X2", "Y", "Z", "A"];
 
 type Props = {
   state: PalletizerState;
@@ -14,6 +14,7 @@ export function TelemetryPanel({ state }: Props) {
   const velocityMmS = Array.isArray(status.vel_mm_s) ? status.vel_mm_s as number[] : [];
   const online = Array.isArray(status.online) ? status.online as number[] : [];
   const enabled = Array.isArray(status.enabled) ? status.enabled as number[] : [];
+  const units = Array.isArray(status.units) ? status.units as string[] : [];
 
   return (
     <section className="section">
@@ -47,8 +48,8 @@ export function TelemetryPanel({ state }: Props) {
             {motorLabels.map((motor, index) => (
               <tr key={motor}>
                 <td>{motor}</td>
-                <td>{mm(positionMm[index])}</td>
-                <td>{mm(velocityMmS[index])}/s</td>
+                <td>{units[index] === "deg" ? deg(positionMm[index]) : mm(positionMm[index])}</td>
+                <td>{units[index] === "deg" ? `${deg(velocityMmS[index])}/s` : `${mm(velocityMmS[index])}/s`}</td>
                 <td>{rpm(state.motor_rpm[index])}</td>
                 <td>{online[index] ? "OK" : "N/D"}</td>
                 <td>{enabled[index] ? "ON" : "OFF"}</td>

@@ -6,7 +6,7 @@ type Props = {
 };
 
 export function JointStatePanel({ state }: Props) {
-  const names = state.joint_states.name.length ? state.joint_states.name : ["X1", "X2", "Y", "Z"];
+  const names = state.joint_states.name.length ? state.joint_states.name : ["X1", "X2", "Y", "Z", "A"];
   return (
     <section className="section">
       <div className="section-heading">

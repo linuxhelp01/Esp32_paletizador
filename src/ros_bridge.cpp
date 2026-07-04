@@ -5,6 +5,7 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include <micro_ros_platformio.h>
 #include <rcl/error_handling.h>
@@ -25,6 +26,7 @@
 #include <palletizer_msgs/srv/get_driver_status.h>
 #include <palletizer_msgs/srv/release_stall.h>
 #include <palletizer_msgs/srv/set_axis_limits.h>
+#include <palletizer_msgs/srv/set_gripper.h>
 #include <palletizer_msgs/srv/set_zero.h>
 #include <sensor_msgs/msg/joint_state.h>
 #include <std_msgs/msg/bool.h>
@@ -54,6 +56,7 @@ static rcl_service_t setAxisLimitsService;
 static rcl_service_t clearFaultService;
 static rcl_service_t releaseStallService;
 static rcl_service_t getDriverStatusService;
+static rcl_service_t setGripperService;
 static rclc_action_server_t moveActionServer;
 static rclc_action_server_t homeActionServer;
 static rclc_action_server_t originActionServer;
@@ -77,6 +80,8 @@ static palletizer_msgs__srv__ReleaseStall_Request releaseStallRequest;
 static palletizer_msgs__srv__ReleaseStall_Response releaseStallResponse;
 static palletizer_msgs__srv__GetDriverStatus_Request getDriverStatusRequest;
 static palletizer_msgs__srv__GetDriverStatus_Response getDriverStatusResponse;
+static palletizer_msgs__srv__SetGripper_Request setGripperRequest;
+static palletizer_msgs__srv__SetGripper_Response setGripperResponse;
 static palletizer_msgs__action__MoveXYZ_SendGoal_Request moveGoalRequest;
 static palletizer_msgs__action__MoveXYZ_FeedbackMessage moveFeedbackMsg;
 static palletizer_msgs__action__MoveXYZ_GetResult_Response moveResultResponse;
@@ -87,16 +92,16 @@ static palletizer_msgs__action__GoOrigin_SendGoal_Request originGoalRequest;
 static palletizer_msgs__action__GoOrigin_FeedbackMessage originFeedbackMsg;
 static palletizer_msgs__action__GoOrigin_GetResult_Response originResultResponse;
 
-static rosidl_runtime_c__String jointNames[4];
-static double jointPositions[4];
-static double jointVelocities[4];
-static double jointEfforts[4];
-static float axisPositionsMm[3];
-static float motorRpms[4];
-static char statusBuffer[1536];
+static rosidl_runtime_c__String jointNames[ROBOT_MOTOR_COUNT];
+static double jointPositions[ROBOT_MOTOR_COUNT];
+static double jointVelocities[ROBOT_MOTOR_COUNT];
+static double jointEfforts[ROBOT_MOTOR_COUNT];
+static float axisPositionsMm[ROBOT_LINEAR_AXIS_COUNT];
+static float motorRpms[ROBOT_MOTOR_COUNT];
+static char statusBuffer[2300];
 static char faultBuffer[96];
 static char commandBuffer[128];
-static char serviceMessageBuffers[6][96];
+static char serviceMessageBuffers[7][96];
 static char driverStatusMessageBuffer[96];
 static char driverStatusSafetyReasonBuffer[96];
 static char driverStatusHomingStateBuffer[48];
@@ -107,16 +112,18 @@ static char homeResultMessageBuffer[96];
 static char originFeedbackStateBuffer[96];
 static char originResultMessageBuffer[96];
 static char frameIdBuffer[] = "palletizer_base";
-static char jointNameBuffers[4][4] = {"X1", "X2", "Y", "Z"};
+static char jointNameBuffers[ROBOT_MOTOR_COUNT][4] = {"X1", "X2", "Y", "Z", "A"};
 
 static constexpr size_t ROS_EXECUTOR_TIMERS = 1;
-static constexpr bool ROS_ENABLE_COMMAND_SUBSCRIBER = false;
+static constexpr bool ROS_ENABLE_COMMAND_SUBSCRIBER = true;
 static constexpr size_t ROS_EXECUTOR_SUBSCRIPTIONS = ROS_ENABLE_COMMAND_SUBSCRIBER ? 2 : 1;
 static constexpr bool ROS_ENABLE_SERVICE_SERVERS = false;
+static constexpr bool ROS_ENABLE_GRIPPER_SERVICE = true;
 static constexpr bool ROS_ENABLE_EXTENDED_SERVICE_SERVERS = false;
-static constexpr size_t ROS_EXECUTOR_SERVICES = ROS_ENABLE_SERVICE_SERVERS
+static constexpr size_t ROS_EXECUTOR_SERVICES = (ROS_ENABLE_SERVICE_SERVERS
                                                    ? (ROS_ENABLE_EXTENDED_SERVICE_SERVERS ? 6 : 2)
-                                                   : 0;
+                                                   : 0) +
+                                                   (ROS_ENABLE_GRIPPER_SERVICE ? 1 : 0);
 static constexpr bool ROS_ENABLE_HOME_ORIGIN_ACTIONS = false;
 static constexpr size_t ROS_EXECUTOR_ACTIONS = ROS_ENABLE_HOME_ORIGIN_ACTIONS ? 3 : 1;
 static constexpr size_t ROS_EXECUTOR_SPARES = 2;
@@ -146,6 +153,7 @@ static bool setAxisLimitsServiceInitialized = false;
 static bool clearFaultServiceInitialized = false;
 static bool releaseStallServiceInitialized = false;
 static bool getDriverStatusServiceInitialized = false;
+static bool setGripperServiceInitialized = false;
 static bool moveActionServerInitialized = false;
 static bool homeActionServerInitialized = false;
 static bool originActionServerInitialized = false;
@@ -155,10 +163,14 @@ static rclc_action_goal_handle_t *activeMoveGoal = nullptr;
 static float moveTargetX = 0.0f;
 static float moveTargetY = 0.0f;
 static float moveTargetZ = 0.0f;
+static float moveTargetA = 0.0f;
 static float moveStartX = 0.0f;
 static float moveStartY = 0.0f;
 static float moveStartZ = 0.0f;
+static float moveStartA = 0.0f;
 static float moveToleranceMm = 1.0f;
+static float moveAngularToleranceDeg = 1.0f;
+static bool moveUseA = false;
 static uint32_t moveStartedMs = 0;
 static uint32_t moveTimeoutMs = 30000;
 static uint32_t movePositionStableSinceMs = 0;
@@ -220,6 +232,7 @@ static void zeroRosHandles() {
   clearFaultService = rcl_get_zero_initialized_service();
   releaseStallService = rcl_get_zero_initialized_service();
   getDriverStatusService = rcl_get_zero_initialized_service();
+  setGripperService = rcl_get_zero_initialized_service();
   moveActionServer = {};
   homeActionServer = {};
   originActionServer = {};
@@ -262,6 +275,7 @@ static void resetRosInitFlags() {
   clearFaultServiceInitialized = false;
   releaseStallServiceInitialized = false;
   getDriverStatusServiceInitialized = false;
+  setGripperServiceInitialized = false;
   moveActionServerInitialized = false;
   homeActionServerInitialized = false;
   originActionServerInitialized = false;
@@ -275,6 +289,7 @@ static void disconnectRosBridge() {
   if (originActionServerInitialized) ignoreRclRet(rclc_action_server_fini(&originActionServer, &node));
   if (homeActionServerInitialized) ignoreRclRet(rclc_action_server_fini(&homeActionServer, &node));
   if (moveActionServerInitialized) ignoreRclRet(rclc_action_server_fini(&moveActionServer, &node));
+  if (setGripperServiceInitialized) ignoreRclRet(rcl_service_fini(&setGripperService, &node));
   if (getDriverStatusServiceInitialized) ignoreRclRet(rcl_service_fini(&getDriverStatusService, &node));
   if (releaseStallServiceInitialized) ignoreRclRet(rcl_service_fini(&releaseStallService, &node));
   if (clearFaultServiceInitialized) ignoreRclRet(rcl_service_fini(&clearFaultService, &node));
@@ -338,6 +353,8 @@ static float axisPositionFromSnapshot(const RobotStateSnapshot &snapshot, uint8_
       if (zAbs > maxAbs) maxAbs = zAbs;
       return maxAbs;
     }
+    case 4:
+      return snapshot.motorPositionMm[4];
     default:
       return 0.0f;
   }
@@ -359,6 +376,8 @@ static float axisOriginError(const RobotStateSnapshot &snapshot, uint8_t axis) {
       if (zError > maxError) maxError = zError;
       return maxError;
     }
+    case 4:
+      return fabsf(snapshot.motorPositionMm[4]);
     default:
       return INFINITY;
   }
@@ -408,9 +427,8 @@ static float commandablePositionMm(float mm) {
   return robotCommandablePositionMm(mm);
 }
 
-static float maxMoveErrorMm() {
-  RobotStateSnapshot state;
-  if (!getRobotStateSnapshot(state) || !state.axisPositionsValid) return INFINITY;
+static float maxMoveLinearErrorMm(const RobotStateSnapshot &state) {
+  if (!state.axisPositionsValid) return INFINITY;
 
   float maxError = fabsf(moveTargetX - state.axisPositionMm[0]);
   const float yError = fabsf(moveTargetY - state.axisPositionMm[1]);
@@ -418,6 +436,18 @@ static float maxMoveErrorMm() {
   if (yError > maxError) maxError = yError;
   if (zError > maxError) maxError = zError;
   return maxError;
+}
+
+static float maxMoveErrorMm() {
+  RobotStateSnapshot state;
+  if (!getRobotStateSnapshot(state)) return INFINITY;
+  return maxMoveLinearErrorMm(state);
+}
+
+static float moveAngularErrorDeg(const RobotStateSnapshot &state) {
+  if (!moveUseA) return 0.0f;
+  if (!state.encoderOk[4]) return INFINITY;
+  return fabsf(moveTargetA - state.motorPositionMm[4]);
 }
 
 static bool measuredPositionIsStableAtTarget() {
@@ -430,7 +460,13 @@ static bool measuredPositionIsStableAtTarget() {
   const float settleTolerance = moveToleranceMm > ACTION_RESULT_MIN_TOLERANCE_MM
                                     ? moveToleranceMm
                                     : ACTION_RESULT_MIN_TOLERANCE_MM;
-  if (maxMoveErrorMm() > settleTolerance) {
+  if (maxMoveLinearErrorMm(state) > settleTolerance) {
+    movePositionStableSinceMs = 0;
+    return false;
+  }
+
+  const float angularSettleTolerance = moveAngularToleranceDeg > 0.0f ? moveAngularToleranceDeg : 1.0f;
+  if (moveAngularErrorDeg(state) > angularSettleTolerance) {
     movePositionStableSinceMs = 0;
     return false;
   }
@@ -449,26 +485,45 @@ static void fillMoveFeedback(const char *state) {
   const float currentX = haveSnapshot ? snapshot.axisPositionMm[0] : 0.0f;
   const float currentY = haveSnapshot ? snapshot.axisPositionMm[1] : 0.0f;
   const float currentZ = haveSnapshot ? snapshot.axisPositionMm[2] : 0.0f;
+  const float currentA = haveSnapshot && snapshot.encoderOk[4] ? snapshot.motorPositionMm[4] : 0.0f;
 
   moveFeedbackMsg.feedback.current_x_mm = currentX;
   moveFeedbackMsg.feedback.current_y_mm = currentY;
   moveFeedbackMsg.feedback.current_z_mm = currentZ;
+  moveFeedbackMsg.feedback.current_a_deg = currentA;
   moveFeedbackMsg.feedback.error_x_mm = moveTargetX - currentX;
   moveFeedbackMsg.feedback.error_y_mm = moveTargetY - currentY;
   moveFeedbackMsg.feedback.error_z_mm = moveTargetZ - currentZ;
+  moveFeedbackMsg.feedback.error_a_deg = moveUseA ? moveTargetA - currentA : 0.0f;
 
   const float totalDistance = distance3(moveTargetX - moveStartX, moveTargetY - moveStartY, moveTargetZ - moveStartZ);
   const float remainingDistance = distance3(
       moveFeedbackMsg.feedback.error_x_mm,
       moveFeedbackMsg.feedback.error_y_mm,
       moveFeedbackMsg.feedback.error_z_mm);
+  float linearProgress = 0.0f;
   if (totalDistance <= 0.001f) {
-    moveFeedbackMsg.feedback.progress = maxMoveErrorMm() <= moveToleranceMm ? 1.0f : 0.0f;
+    linearProgress = maxMoveErrorMm() <= moveToleranceMm ? 1.0f : 0.0f;
   } else {
-    moveFeedbackMsg.feedback.progress = 1.0f - (remainingDistance / totalDistance);
-    if (moveFeedbackMsg.feedback.progress < 0.0f) moveFeedbackMsg.feedback.progress = 0.0f;
-    if (moveFeedbackMsg.feedback.progress > 1.0f) moveFeedbackMsg.feedback.progress = 1.0f;
+    linearProgress = 1.0f - (remainingDistance / totalDistance);
+    if (linearProgress < 0.0f) linearProgress = 0.0f;
+    if (linearProgress > 1.0f) linearProgress = 1.0f;
   }
+
+  float progress = linearProgress;
+  if (moveUseA) {
+    float angularProgress = 0.0f;
+    const float totalAngularDistance = fabsf(moveTargetA - moveStartA);
+    if (totalAngularDistance <= 0.001f) {
+      angularProgress = fabsf(moveFeedbackMsg.feedback.error_a_deg) <= moveAngularToleranceDeg ? 1.0f : 0.0f;
+    } else {
+      angularProgress = 1.0f - (fabsf(moveFeedbackMsg.feedback.error_a_deg) / totalAngularDistance);
+      if (angularProgress < 0.0f) angularProgress = 0.0f;
+      if (angularProgress > 1.0f) angularProgress = 1.0f;
+    }
+    if (angularProgress < progress) progress = angularProgress;
+  }
+  moveFeedbackMsg.feedback.progress = progress;
 
   setMoveFeedbackState(state);
 }
@@ -484,6 +539,7 @@ static rcl_ret_t finishMoveGoal(rcl_action_goal_state_t state, bool success, con
   moveResultResponse.result.final_x_mm = snapshot.axisPositionMm[0];
   moveResultResponse.result.final_y_mm = snapshot.axisPositionMm[1];
   moveResultResponse.result.final_z_mm = snapshot.axisPositionMm[2];
+  moveResultResponse.result.final_a_deg = snapshot.encoderOk[4] ? snapshot.motorPositionMm[4] : 0.0f;
   setMoveResultMessage(message);
 
   const rcl_ret_t result = rclc_action_send_result(activeMoveGoal, state, &moveResultResponse);
@@ -765,18 +821,86 @@ static void stampJointState() {
   jointStateMsg.header.stamp.nanosec = (nowMs % 1000) * 1000000;
 }
 
+static void appendStatus(const char *fmt, ...) {
+  const size_t used = strlen(statusBuffer);
+  if (used >= sizeof(statusBuffer) - 1) return;
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(statusBuffer + used, sizeof(statusBuffer) - used, fmt, args);
+  va_end(args);
+}
+
+static void appendBoolArray(const char *key, const bool *values, size_t count) {
+  appendStatus(",\"%s\":[", key);
+  for (size_t i = 0; i < count; i++) {
+    appendStatus("%s%u", i ? "," : "", values[i] ? 1 : 0);
+  }
+  appendStatus("]");
+}
+
+static void appendUint8Array(const char *key, const uint8_t *values, size_t count) {
+  appendStatus(",\"%s\":[", key);
+  for (size_t i = 0; i < count; i++) {
+    appendStatus("%s%u", i ? "," : "", values[i]);
+  }
+  appendStatus("]");
+}
+
+static void appendInt16Array(const char *key, const int16_t *values, size_t count) {
+  appendStatus(",\"%s\":[", key);
+  for (size_t i = 0; i < count; i++) {
+    appendStatus("%s%d", i ? "," : "", values[i]);
+  }
+  appendStatus("]");
+}
+
+static void appendInt32Array(const char *key, const int32_t *values, size_t count) {
+  appendStatus(",\"%s\":[", key);
+  for (size_t i = 0; i < count; i++) {
+    appendStatus("%s%ld", i ? "," : "", static_cast<long>(values[i]));
+  }
+  appendStatus("]");
+}
+
+static void appendInt64Array(const char *key, const int64_t *values, size_t count) {
+  appendStatus(",\"%s\":[", key);
+  for (size_t i = 0; i < count; i++) {
+    appendStatus("%s%lld", i ? "," : "", static_cast<long long>(values[i]));
+  }
+  appendStatus("]");
+}
+
+static void appendFloatArray(const char *key, const float *values, size_t count) {
+  appendStatus(",\"%s\":[", key);
+  for (size_t i = 0; i < count; i++) {
+    appendStatus("%s%.3f", i ? "," : "", values[i]);
+  }
+  appendStatus("]");
+}
+
+static void appendHome3BArray(const RobotStateSnapshot &snapshot) {
+  appendStatus(",\"home3B\":[");
+  for (size_t i = 0; i < ROBOT_MOTOR_COUNT; i++) {
+    appendStatus("%s[%u,%u]", i ? "," : "", snapshot.homeStatusSingleTurn[i], snapshot.homeStatusOrigin[i]);
+  }
+  appendStatus("]");
+}
+
 static void fillTelemetryMessages() {
   stampJointState();
 
   RobotStateSnapshot snapshot;
   getRobotStateSnapshot(snapshot);
 
-  for (size_t i = 0; i < 4; i++) {
+  for (size_t i = 0; i < ROBOT_MOTOR_COUNT; i++) {
+    const bool rotary = i == 4;
     jointPositions[i] = snapshot.encoderOk[i]
-                            ? static_cast<double>(snapshot.motorPositionMm[i]) / 1000.0
+                            ? (rotary ? static_cast<double>(snapshot.motorPositionMm[i]) * PI / 180.0
+                                      : static_cast<double>(snapshot.motorPositionMm[i]) / 1000.0)
                             : 0.0;
     jointVelocities[i] = snapshot.encoderOk[i]
-                             ? static_cast<double>(snapshot.motorVelocityMmS[i]) / 1000.0
+                             ? (rotary ? static_cast<double>(snapshot.motorVelocityMmS[i]) * PI / 180.0
+                                       : static_cast<double>(snapshot.motorVelocityMmS[i]) / 1000.0)
                              : 0.0;
     jointEfforts[i] = 0.0;
     motorRpms[i] = snapshot.rpmOk[i] ? static_cast<float>(snapshot.motorRpm[i]) : 0.0f;
@@ -786,61 +910,26 @@ static void fillTelemetryMessages() {
   axisPositionsMm[1] = snapshot.axisPositionsValid ? snapshot.axisPositionMm[1] : 0.0f;
   axisPositionsMm[2] = snapshot.axisPositionsValid ? snapshot.axisPositionMm[2] : 0.0f;
 
-  const int written = snprintf(
-      statusBuffer,
-      sizeof(statusBuffer),
-      "{\"fault\":%u,\"reason\":\"%s\",\"homing\":\"%s\",\"online\":[%u,%u,%u,%u],\"enabledOk\":[%u,%u,%u,%u],\"enabled\":[%u,%u,%u,%u],\"stalled\":[%u,%u,%u,%u],\"raw35Ok\":[%u,%u,%u,%u],\"angleOk\":[%u,%u,%u,%u],\"enc31\":[%lld,%lld,%lld,%lld],\"raw35\":[%lld,%lld,%lld,%lld],\"mm\":[%.3f,%.3f,%.3f,%.3f],\"vel_mm_s\":[%.3f,%.3f,%.3f,%.3f],\"rpm\":[%d,%d,%d,%d],\"angleError\":[%ld,%ld,%ld,%ld],\"limits\":[[%u,%.3f,%.3f],[%u,%.3f,%.3f],[%u,%.3f,%.3f]],\"moveStatus\":[%u,%u,%u,%u],\"home91\":[%u,%u,%u,%u],\"home3B\":[[%u,%u],[%u,%u],[%u,%u],[%u,%u]]}",
+  statusBuffer[0] = '\0';
+  appendStatus(
+      "{\"fault\":%u,\"reason\":\"%s\",\"homing\":\"%s\"",
       snapshot.safetyFault ? 1 : 0,
       snapshot.safetyReason,
-      snapshot.homingState,
-      snapshot.motorOnline[0] ? 1 : 0,
-      snapshot.motorOnline[1] ? 1 : 0,
-      snapshot.motorOnline[2] ? 1 : 0,
-      snapshot.motorOnline[3] ? 1 : 0,
-      snapshot.enabledOk[0] ? 1 : 0,
-      snapshot.enabledOk[1] ? 1 : 0,
-      snapshot.enabledOk[2] ? 1 : 0,
-      snapshot.enabledOk[3] ? 1 : 0,
-      snapshot.enabled[0] ? 1 : 0,
-      snapshot.enabled[1] ? 1 : 0,
-      snapshot.enabled[2] ? 1 : 0,
-      snapshot.enabled[3] ? 1 : 0,
-      snapshot.stalled[0] ? 1 : 0,
-      snapshot.stalled[1] ? 1 : 0,
-      snapshot.stalled[2] ? 1 : 0,
-      snapshot.stalled[3] ? 1 : 0,
-      snapshot.rawEncoderOk[0] ? 1 : 0,
-      snapshot.rawEncoderOk[1] ? 1 : 0,
-      snapshot.rawEncoderOk[2] ? 1 : 0,
-      snapshot.rawEncoderOk[3] ? 1 : 0,
-      snapshot.angleErrorOk[0] ? 1 : 0,
-      snapshot.angleErrorOk[1] ? 1 : 0,
-      snapshot.angleErrorOk[2] ? 1 : 0,
-      snapshot.angleErrorOk[3] ? 1 : 0,
-      static_cast<long long>(snapshot.encoder[0]),
-      static_cast<long long>(snapshot.encoder[1]),
-      static_cast<long long>(snapshot.encoder[2]),
-      static_cast<long long>(snapshot.encoder[3]),
-      static_cast<long long>(snapshot.rawDiagnosticEncoder[0]),
-      static_cast<long long>(snapshot.rawDiagnosticEncoder[1]),
-      static_cast<long long>(snapshot.rawDiagnosticEncoder[2]),
-      static_cast<long long>(snapshot.rawDiagnosticEncoder[3]),
-      snapshot.motorPositionMm[0],
-      snapshot.motorPositionMm[1],
-      snapshot.motorPositionMm[2],
-      snapshot.motorPositionMm[3],
-      snapshot.motorVelocityMmS[0],
-      snapshot.motorVelocityMmS[1],
-      snapshot.motorVelocityMmS[2],
-      snapshot.motorVelocityMmS[3],
-      snapshot.motorRpm[0],
-      snapshot.motorRpm[1],
-      snapshot.motorRpm[2],
-      snapshot.motorRpm[3],
-      static_cast<long>(snapshot.angleError[0]),
-      static_cast<long>(snapshot.angleError[1]),
-      static_cast<long>(snapshot.angleError[2]),
-      static_cast<long>(snapshot.angleError[3]),
+      snapshot.homingState);
+  appendBoolArray("online", snapshot.motorOnline, ROBOT_MOTOR_COUNT);
+  appendBoolArray("enabledOk", snapshot.enabledOk, ROBOT_MOTOR_COUNT);
+  appendBoolArray("enabled", snapshot.enabled, ROBOT_MOTOR_COUNT);
+  appendBoolArray("stalled", snapshot.stalled, ROBOT_MOTOR_COUNT);
+  appendBoolArray("raw35Ok", snapshot.rawEncoderOk, ROBOT_MOTOR_COUNT);
+  appendBoolArray("angleOk", snapshot.angleErrorOk, ROBOT_MOTOR_COUNT);
+  appendInt64Array("enc31", snapshot.encoder, ROBOT_MOTOR_COUNT);
+  appendInt64Array("raw35", snapshot.rawDiagnosticEncoder, ROBOT_MOTOR_COUNT);
+  appendFloatArray("mm", snapshot.motorPositionMm, ROBOT_MOTOR_COUNT);
+  appendFloatArray("vel_mm_s", snapshot.motorVelocityMmS, ROBOT_MOTOR_COUNT);
+  appendInt16Array("rpm", snapshot.motorRpm, ROBOT_MOTOR_COUNT);
+  appendInt32Array("angleError", snapshot.angleError, ROBOT_MOTOR_COUNT);
+  appendStatus(
+      ",\"units\":[\"mm\",\"mm\",\"mm\",\"mm\",\"deg\"],\"limits\":[[%u,%.3f,%.3f],[%u,%.3f,%.3f],[%u,%.3f,%.3f]]",
       snapshot.axisLimitsConfigured[0] ? 1 : 0,
       snapshot.axisMinMm[0],
       snapshot.axisMaxMm[0],
@@ -849,24 +938,18 @@ static void fillTelemetryMessages() {
       snapshot.axisMaxMm[1],
       snapshot.axisLimitsConfigured[2] ? 1 : 0,
       snapshot.axisMinMm[2],
-      snapshot.axisMaxMm[2],
-      snapshot.moveStatus[0],
-      snapshot.moveStatus[1],
-      snapshot.moveStatus[2],
-      snapshot.moveStatus[3],
-      snapshot.homeStatus[0],
-      snapshot.homeStatus[1],
-      snapshot.homeStatus[2],
-      snapshot.homeStatus[3],
-      snapshot.homeStatusSingleTurn[0],
-      snapshot.homeStatusOrigin[0],
-      snapshot.homeStatusSingleTurn[1],
-      snapshot.homeStatusOrigin[1],
-      snapshot.homeStatusSingleTurn[2],
-      snapshot.homeStatusOrigin[2],
-      snapshot.homeStatusSingleTurn[3],
-      snapshot.homeStatusOrigin[3]);
-  statusMsg.data.size = written > 0 ? min(static_cast<size_t>(written), sizeof(statusBuffer) - 1) : 0;
+      snapshot.axisMaxMm[2]);
+  appendUint8Array("moveStatus", snapshot.moveStatus, ROBOT_MOTOR_COUNT);
+  appendUint8Array("home91", snapshot.homeStatus, ROBOT_MOTOR_COUNT);
+  appendHome3BArray(snapshot);
+  appendStatus(
+      ",\"a_deg\":%.3f,\"aux_servo\":{\"enabled\":%u,\"pin\":%d,\"pulse_us\":%u,\"angle_deg\":%.1f}}",
+      snapshot.motorPositionMm[4],
+      snapshot.auxServoEnabled ? 1 : 0,
+      static_cast<int>(AUX_SERVO_PWM_PIN),
+      snapshot.auxServoPulseUs,
+      snapshot.auxServoAngleDeg);
+  statusMsg.data.size = strlen(statusBuffer);
 
   const int faultWritten = snprintf(
       faultBuffer,
@@ -1038,7 +1121,7 @@ static void onGetDriverStatusService(const void *, void *responseOut) {
   writeString(response->safety_reason, driverStatusSafetyReasonBuffer, sizeof(driverStatusSafetyReasonBuffer), snapshot.safetyReason);
   writeString(response->homing_state, driverStatusHomingStateBuffer, sizeof(driverStatusHomingStateBuffer), snapshot.homingState);
 
-  for (size_t i = 0; i < 4; i++) {
+  for (size_t i = 0; i < ROBOT_MOTOR_COUNT; i++) {
     response->online[i] = snapshot.motorOnline[i];
     response->enabled_ok[i] = snapshot.enabledOk[i];
     response->enabled[i] = snapshot.enabled[i];
@@ -1062,6 +1145,20 @@ static void onGetDriverStatusService(const void *, void *responseOut) {
   }
 }
 
+static void onSetGripperService(const void *requestIn, void *responseOut) {
+  const auto *request = static_cast<const palletizer_msgs__srv__SetGripper_Request *>(requestIn);
+  auto *response = static_cast<palletizer_msgs__srv__SetGripper_Response *>(responseOut);
+
+  const float targetAngleDeg = request->closed ? AUX_SERVO_MIN_DEG : AUX_SERVO_MAX_DEG;
+  uint32_t commandId = 0;
+  const bool queued = robotRequestAuxServoAngle(targetAngleDeg, commandId);
+  finishCommandService(queued, commandId, response->success, response->message, serviceMessageBuffers[6], sizeof(serviceMessageBuffers[6]));
+
+  response->closed = request->closed;
+  response->angle_deg = targetAngleDeg;
+  response->pulse_us = request->closed ? AUX_SERVO_MIN_US : AUX_SERVO_MAX_US;
+}
+
 static bool anyActionActive() {
   return activeMoveGoal || activeHomeGoal || activeOriginGoal;
 }
@@ -1077,11 +1174,16 @@ static rcl_ret_t onMoveGoal(rclc_action_goal_handle_t *goalHandle, void *) {
   const float requestedX = request->goal.x_mm;
   const float requestedY = request->goal.y_mm;
   const float requestedZ = request->goal.z_mm;
+  const bool requestedUseA = request->goal.use_a;
+  const float requestedA = request->goal.a_deg;
 
   moveTargetX = commandablePositionMm(requestedX);
   moveTargetY = commandablePositionMm(requestedY);
   moveTargetZ = commandablePositionMm(requestedZ);
+  moveUseA = requestedUseA;
+  moveTargetA = requestedA;
   moveToleranceMm = request->goal.tolerance_mm > 0.0f ? request->goal.tolerance_mm : 1.0f;
+  moveAngularToleranceDeg = request->goal.angular_tolerance_deg > 0.0f ? request->goal.angular_tolerance_deg : 1.0f;
   moveTimeoutMs = request->goal.timeout_ms > 0 ? request->goal.timeout_ms : 30000;
   moveStartedMs = millis();
   movePositionStableSinceMs = 0;
@@ -1094,13 +1196,18 @@ static rcl_ret_t onMoveGoal(rclc_action_goal_handle_t *goalHandle, void *) {
   moveStartX = snapshot.axisPositionMm[0];
   moveStartY = snapshot.axisPositionMm[1];
   moveStartZ = snapshot.axisPositionMm[2];
+  moveStartA = snapshot.encoderOk[4] ? snapshot.motorPositionMm[4] : 0.0f;
 
-  const bool commandQueued = robotRequestMoveXYZMm(
+  const bool commandQueued = robotRequestMoveXYZAMmDeg(
       requestedX,
       requestedY,
       requestedZ,
+      requestedUseA,
+      requestedA,
       request->goal.speed_mm_s,
       request->goal.accel_mm_s2,
+      request->goal.angular_speed_deg_s,
+      request->goal.angular_accel_deg_s2,
       moveControlCommandId);
 
   if (!commandQueued) {
@@ -1199,37 +1306,37 @@ static void initMessages() {
   setString(jointStateMsg.header.frame_id, frameIdBuffer, sizeof(frameIdBuffer), strlen(frameIdBuffer));
 
   jointStateMsg.name.data = jointNames;
-  jointStateMsg.name.size = 4;
-  jointStateMsg.name.capacity = 4;
-  for (size_t i = 0; i < 4; i++) {
+  jointStateMsg.name.size = ROBOT_MOTOR_COUNT;
+  jointStateMsg.name.capacity = ROBOT_MOTOR_COUNT;
+  for (size_t i = 0; i < ROBOT_MOTOR_COUNT; i++) {
     setString(jointNames[i], jointNameBuffers[i], sizeof(jointNameBuffers[i]), strlen(jointNameBuffers[i]));
   }
 
   jointStateMsg.position.data = jointPositions;
-  jointStateMsg.position.size = 4;
-  jointStateMsg.position.capacity = 4;
+  jointStateMsg.position.size = ROBOT_MOTOR_COUNT;
+  jointStateMsg.position.capacity = ROBOT_MOTOR_COUNT;
   jointStateMsg.velocity.data = jointVelocities;
-  jointStateMsg.velocity.size = 4;
-  jointStateMsg.velocity.capacity = 4;
+  jointStateMsg.velocity.size = ROBOT_MOTOR_COUNT;
+  jointStateMsg.velocity.capacity = ROBOT_MOTOR_COUNT;
   jointStateMsg.effort.data = jointEfforts;
-  jointStateMsg.effort.size = 4;
-  jointStateMsg.effort.capacity = 4;
+  jointStateMsg.effort.size = ROBOT_MOTOR_COUNT;
+  jointStateMsg.effort.capacity = ROBOT_MOTOR_COUNT;
 
   axisPositionMsg.layout.dim.size = 0;
   axisPositionMsg.layout.dim.capacity = 0;
   axisPositionMsg.layout.dim.data = nullptr;
   axisPositionMsg.layout.data_offset = 0;
   axisPositionMsg.data.data = axisPositionsMm;
-  axisPositionMsg.data.size = 3;
-  axisPositionMsg.data.capacity = 3;
+  axisPositionMsg.data.size = ROBOT_LINEAR_AXIS_COUNT;
+  axisPositionMsg.data.capacity = ROBOT_LINEAR_AXIS_COUNT;
 
   motorRpmMsg.layout.dim.size = 0;
   motorRpmMsg.layout.dim.capacity = 0;
   motorRpmMsg.layout.dim.data = nullptr;
   motorRpmMsg.layout.data_offset = 0;
   motorRpmMsg.data.data = motorRpms;
-  motorRpmMsg.data.size = 4;
-  motorRpmMsg.data.capacity = 4;
+  motorRpmMsg.data.size = ROBOT_MOTOR_COUNT;
+  motorRpmMsg.data.capacity = ROBOT_MOTOR_COUNT;
 
   setString(statusMsg.data, statusBuffer, sizeof(statusBuffer));
   setString(faultMsg.data, faultBuffer, sizeof(faultBuffer));
@@ -1237,6 +1344,7 @@ static void initMessages() {
   setString(enableAxisResponse.message, serviceMessageBuffers[0], sizeof(serviceMessageBuffers[0]));
   setString(setZeroResponse.message, serviceMessageBuffers[1], sizeof(serviceMessageBuffers[1]));
   setString(setAxisLimitsResponse.message, serviceMessageBuffers[2], sizeof(serviceMessageBuffers[2]));
+  setString(setGripperResponse.message, serviceMessageBuffers[6], sizeof(serviceMessageBuffers[6]));
   setString(clearFaultResponse.message, serviceMessageBuffers[3], sizeof(serviceMessageBuffers[3]));
   setString(releaseStallResponse.message, serviceMessageBuffers[4], sizeof(serviceMessageBuffers[4]));
   setString(getDriverStatusResponse.message, driverStatusMessageBuffer, sizeof(driverStatusMessageBuffer));
@@ -1382,6 +1490,18 @@ bool beginRosBridge() {
     commandSubscriberInitialized = true;
   }
 
+  if (ROS_ENABLE_GRIPPER_SERVICE) {
+    if (!check(rclc_service_init_default(
+            &setGripperService,
+            &node,
+            ROSIDL_GET_SRV_TYPE_SUPPORT(palletizer_msgs, srv, SetGripper),
+            "/palletizer/set_gripper"))) {
+      disconnectRosBridge();
+      return false;
+    }
+    setGripperServiceInitialized = true;
+  }
+
   if (ROS_ENABLE_SERVICE_SERVERS) {
     if (check(rclc_service_init_default(
             &enableAxisService, &node,
@@ -1474,6 +1594,16 @@ bool beginRosBridge() {
     disconnectRosBridge();
     return false;
   }
+  if (ROS_ENABLE_GRIPPER_SERVICE && setGripperServiceInitialized &&
+      !check(rclc_executor_add_service(
+          &executor,
+          &setGripperService,
+          &setGripperRequest,
+          &setGripperResponse,
+          onSetGripperService))) {
+    disconnectRosBridge();
+    return false;
+  }
   if (!check(rclc_executor_add_action_server(
           &executor,
           &moveActionServer,
@@ -1487,7 +1617,17 @@ bool beginRosBridge() {
     return false;
   }
   if (ROS_ENABLE_HOME_ORIGIN_ACTIONS) {
-    if (!check(rclc_executor_add_action_server(
+    if (ROS_ENABLE_GRIPPER_SERVICE && setGripperServiceInitialized &&
+      !check(rclc_executor_add_service(
+          &executor,
+          &setGripperService,
+          &setGripperRequest,
+          &setGripperResponse,
+          onSetGripperService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_action_server(
             &executor,
             &homeActionServer,
             1,
@@ -1499,7 +1639,17 @@ bool beginRosBridge() {
       disconnectRosBridge();
       return false;
     }
-    if (!check(rclc_executor_add_action_server(
+    if (ROS_ENABLE_GRIPPER_SERVICE && setGripperServiceInitialized &&
+      !check(rclc_executor_add_service(
+          &executor,
+          &setGripperService,
+          &setGripperRequest,
+          &setGripperResponse,
+          onSetGripperService))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (!check(rclc_executor_add_action_server(
             &executor,
             &originActionServer,
             1,

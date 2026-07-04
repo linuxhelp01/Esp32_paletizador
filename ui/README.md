@@ -23,10 +23,10 @@ WebSocket. El backend es un nodo ROS 2 `rclpy` que:
 - escucha `/palletizer/status`
 - escucha `/palletizer/fault_state`
 - publica `/palletizer/emergency_stop`
-- envia goals a `/palletizer/move_xyz`
+- envia goals XYZ + A a `/palletizer/move_xyz`
 - deja preparados servicios y actions secundarios para cuando el firmware los exponga
 
-La interfaz incluye un panel de gemelo digital 3D. El panel actual usa una geometria plantilla: por defecto el mouse orienta la camara, y solo despues de hacer click en la esfera amarilla se habilita el arrastre del setpoint X/Y. Z, velocidad, aceleracion, tolerancia y timeout se ingresan con teclado; el envio se realiza por `/palletizer/move_xyz`. Tambien existe una ventana deslizante para estados detallados de motores.
+La interfaz incluye un panel de gemelo digital 3D. El panel actual usa una geometria plantilla: por defecto el mouse orienta la camara, y solo despues de hacer click en la esfera amarilla se habilita el arrastre del setpoint X/Y. Z, velocidad/aceleracion lineal, A en grados, velocidad/aceleracion angular, tolerancias y timeout se ingresan con teclado; el envio se realiza por `/palletizer/move_xyz`. Tambien existe una ventana deslizante para estados detallados de motores.
 
 ## Arranque
 
@@ -129,12 +129,11 @@ El firmware actual expone solo una parte del grafo ROS para mantener estabilidad
 micro-ROS:
 
 ```text
-activos: topics de telemetria, /palletizer/emergency_stop, /palletizer/move_xyz
-desactivados: services, /palletizer/command, /palletizer/home_axis, /palletizer/go_origin
+activos: topics de telemetria, /palletizer/emergency_stop, /palletizer/command, /palletizer/move_xyz
+desactivados: services, /palletizer/home_axis, /palletizer/go_origin
 ```
 
-La UI muestra esos controles secundarios, pero los deshabilita si el backend no
-detecta la entidad ROS correspondiente.
+La UI muestra esos controles secundarios. Para homing/origen y servo auxiliar usa `/palletizer/command` como fallback cuando las actions o services opcionales no estan disponibles.
 
 ## Modelo 3D
 
@@ -157,3 +156,44 @@ La documentacion acumulada para GitHub esta en:
 README.md
 docs/README.md
 ```
+
+
+## Eje A y Servo PWM
+
+La interfaz contempla un quinto driver fisico como eje rotatorio `A` con CAN ID `0x05`. En las tablas de telemetria aparece como motor `A`; en `joint_states` se publica como junta rotatoria en radianes.
+
+En el panel de homing se puede seleccionar `A rotatorio` y presionar `Home`. Si la action `/palletizer/home_axis` no esta disponible, el backend envia el comando textual `HOME A` por `/palletizer/command`.
+
+El panel `Servo PWM` controla el actuador auxiliar por angulo o pulso en microsegundos. El pin por defecto es `GPIO 18` y se ajusta en `src/config.h`.
+
+Servicio de pinza/servo:
+
+```text
+/palletizer/set_gripper [palletizer_msgs/srv/SetGripper]
+```
+
+Request:
+
+```text
+bool closed   # true=tomar/cerrar, false=soltar/abrir
+```
+
+Response:
+
+```text
+bool success
+string message
+bool closed
+float32 angle_deg
+uint16 pulse_us
+```
+
+Mapeo actual del firmware:
+
+```text
+closed=true  -> SERVO 0 deg   -> tomar/cerrar
+closed=false -> SERVO 180 deg -> soltar/abrir
+```
+
+
+La barra superior del visor muestra cuatro estados: `UI conectada`, `Conexion fisica ESP32`, `Comunicacion ROS` y `Paletizador operativo`. `UI conectada` solo confirma WebSocket con el backend. `Conexion fisica ESP32` se activa si el nodo `/palletizer_controller` aparece en el grafo o llega telemetria desde el ESP32-S3. `Comunicacion ROS` exige mensajes ROS frescos. `Paletizador operativo` exige comunicacion ROS, sin falla, y los 5 motores `online`, `enabled` y sin `stalled`.

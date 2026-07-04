@@ -28,10 +28,11 @@ Topicos publicados actualmente:
 /palletizer/status
 ```
 
-Subscriber activo actualmente:
+Subscribers activos actualmente:
 
 ```text
 /palletizer/emergency_stop
+/palletizer/command
 ```
 
 Action activa actualmente:
@@ -40,14 +41,13 @@ Action activa actualmente:
 /palletizer/move_xyz [palletizer_msgs/action/MoveXYZ]
 ```
 
-No hay services activos en el perfil actual.
+No hay services activos en el perfil actual. El subscriber `/palletizer/command` queda activo para comandos auxiliares de bajo costo como `HOME A` y control del servo PWM.
 
 Estas funciones existen en codigo o en las interfaces, pero estan desactivadas
 en el grafo ROS actual para evitar reconexiones e inestabilidad por exceso de
 entidades micro-ROS:
 
 ```text
-/palletizer/command
 /palletizer/enable_axis
 /palletizer/set_axis_limits
 /palletizer/set_zero
@@ -176,6 +176,7 @@ Estado esperado actualmente:
 ```text
 Subscribers:
   /palletizer/emergency_stop
+  /palletizer/command
 
 Publishers:
   /joint_states
@@ -302,20 +303,25 @@ palletizer_msgs/action/MoveXYZ
 Campos del goal:
 
 ```text
-x_mm          posicion X absoluta en mm
-y_mm          posicion Y absoluta en mm
-z_mm          posicion Z absoluta en mm
-speed_mm_s    velocidad lineal en mm/s
-accel_mm_s2   aceleracion lineal en mm/s2
-tolerance_mm  tolerancia de llegada en mm
-timeout_ms    tiempo maximo antes de abortar
+x_mm                   posicion X absoluta en mm
+y_mm                   posicion Y absoluta en mm
+z_mm                   posicion Z absoluta en mm
+use_a                  si es true, el action tambien mueve el eje A
+a_deg                  posicion absoluta del eje A en grados
+speed_mm_s             velocidad lineal XYZ en mm/s
+accel_mm_s2            aceleracion lineal XYZ en mm/s2
+angular_speed_deg_s    velocidad angular A en deg/s
+angular_accel_deg_s2   aceleracion angular A en deg/s2
+tolerance_mm           tolerancia de llegada XYZ en mm
+angular_tolerance_deg  tolerancia de llegada A en grados
+timeout_ms             tiempo maximo antes de abortar
 ```
 
 Ejemplo:
 
 ```bash
 ros2 action send_goal /palletizer/move_xyz palletizer_msgs/action/MoveXYZ \
-"{x_mm: 50.0, y_mm: 50.0, z_mm: 20.0, speed_mm_s: 25.0, accel_mm_s2: 50.0, tolerance_mm: 1.0, timeout_ms: 30000}" \
+"{x_mm: 50.0, y_mm: 50.0, z_mm: 20.0, use_a: true, a_deg: 90.0, speed_mm_s: 25.0, accel_mm_s2: 50.0, angular_speed_deg_s: 90.0, angular_accel_deg_s2: 180.0, tolerance_mm: 1.0, angular_tolerance_deg: 1.0, timeout_ms: 30000}" \
 --feedback
 ```
 
@@ -325,9 +331,11 @@ Feedback esperado:
 current_x_mm
 current_y_mm
 current_z_mm
+current_a_deg
 error_x_mm
 error_y_mm
 error_z_mm
+error_a_deg
 progress
 state
 ```
@@ -369,6 +377,47 @@ El feedback de la action esta limitado a:
 ```text
 ACTION_FEEDBACK_PERIOD_MS = 50 ms
 ```
+
+## Eje A rotatorio y servo PWM
+
+Se agrego un cuarto grado de libertad logico como eje `A`. Este eje usa un driver MKS Servo42D en la red CAN con:
+
+```text
+CAN ID A = 0x05
+```
+
+`A` es rotatorio y no usa limites lineales de software. Su posicion se calcula desde el encoder 0x31 en grados y se publica en:
+
+```text
+/joint_states        A en radianes
+/palletizer/status   a_deg y arrays de 5 motores
+/palletizer/motor_rpm 5 valores: X1, X2, Y, Z, A
+```
+
+El homing independiente del eje rotatorio se puede solicitar desde React con el boton de homing seleccionando `A rotatorio`. El backend usa la action `/palletizer/home_axis` si esta disponible; si no, publica el comando textual:
+
+```text
+HOME A
+```
+
+El servo auxiliar por PWM tradicional se configura en `src/config.h`:
+
+```cpp
+AUX_SERVO_PWM_PIN = GPIO_NUM_18
+AUX_SERVO_MIN_US = 500
+AUX_SERVO_MAX_US = 2500
+AUX_SERVO_CENTER_US = 1500
+```
+
+Comandos textuales disponibles:
+
+```text
+SERVO <0..180>
+SERVO_US <500..2500>
+SERVO OFF
+```
+
+La UI incluye un panel `Servo PWM` para enviar angulo, pulso en microsegundos o desactivar el PWM.
 
 ## 8. Telemetria y muestreo CAN
 
@@ -421,8 +470,7 @@ baudios. `SERIAL_BAUD = 115200` no suele ser el cuello principal cuando usas
 `/dev/ttyACM0` por USB nativo. El problema visto hasta ahora fue mas bien la
 presion de entidades micro-ROS y telemetria.
 
-Por eso el perfil actual desactivo `/palletizer/command`, services y actions
-secundarias.
+Por eso el perfil actual mantiene desactivados los services y actions secundarias, pero deja activo `/palletizer/command` para comandos auxiliares de baja carga como `HOME A` y `SERVO`.
 
 ## 10. Problemas comunes
 
@@ -463,9 +511,13 @@ micro-ROS.
 
 ### No aparece `/palletizer/command`
 
-Es normal en el firmware actual. Ese subscriber legacy esta desactivado para
-reducir entidades. La interfaz recomendada para movimiento es
-`/palletizer/move_xyz`.
+En el firmware actual deberia aparecer. Si no aparece, probablemente estas ejecutando firmware antiguo o el agente no reconstruyo entidades despues de cargar. Reinicia el agente y verifica:
+
+```bash
+ros2 node info /palletizer_controller
+```
+
+La interfaz recomendada para movimiento cartesiano sigue siendo `/palletizer/move_xyz`; `/palletizer/command` queda para comandos auxiliares como `HOME A` y `SERVO`.
 
 ### Diferencia entre setpoint y `/joint_states`
 
@@ -539,3 +591,32 @@ Pero reactivarlas aumenta la cantidad de entidades micro-ROS. Si se vuelven a
 activar, hay que validar que el agente cree todas las entidades sin reconectar y
 que `ros2 node info /palletizer_controller` muestre el grafo completo de forma
 estable.
+
+Servicio de pinza/servo:
+
+```text
+/palletizer/set_gripper [palletizer_msgs/srv/SetGripper]
+```
+
+Request:
+
+```text
+bool closed   # true=tomar/cerrar, false=soltar/abrir
+```
+
+Response:
+
+```text
+bool success
+string message
+bool closed
+float32 angle_deg
+uint16 pulse_us
+```
+
+Mapeo actual del firmware:
+
+```text
+closed=true  -> SERVO 0 deg   -> tomar/cerrar
+closed=false -> SERVO 180 deg -> soltar/abrir
+```

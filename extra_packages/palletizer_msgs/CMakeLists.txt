@@ -16,6 +16,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/ClearFault.srv"
   "srv/ReleaseStall.srv"
   "srv/GetDriverStatus.srv"
+  "srv/SetGripper.srv"
   DEPENDENCIES action_msgs builtin_interfaces
 )
 

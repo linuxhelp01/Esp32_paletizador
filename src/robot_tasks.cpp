@@ -18,6 +18,9 @@ enum class RobotCommandType : uint8_t {
   SET_AXIS_ENABLE,
   CLEAR_FAULT,
   RELEASE_STALL,
+  AUX_SERVO_ANGLE,
+  AUX_SERVO_PULSE_US,
+  AUX_SERVO_DISABLE,
 };
 
 struct RobotCommand {
@@ -28,12 +31,17 @@ struct RobotCommand {
   float zMm = 0.0f;
   float speedMmS = 0.0f;
   float accelMmS2 = 0.0f;
+  float aDeg = 0.0f;
+  float angularSpeedDegS = 0.0f;
+  float angularAccelDegS2 = 0.0f;
+  bool useA = false;
   uint8_t axis = 0;
   bool flag = false;
   float minMm = 0.0f;
   float maxMm = 0.0f;
   uint16_t fastRpm = 0;
   uint16_t slowRpm = 0;
+  uint16_t pulseUs = 0;
   char text[128] = "";
 };
 
@@ -63,6 +71,12 @@ static Axis axisFromCommand(uint8_t axis) {
       return Axis::Z;
     case 3:
       return Axis::ALL;
+    case 4:
+      return Axis::A;
+    case 5:
+      return Axis::X1;
+    case 6:
+      return Axis::X2;
     default:
       return Axis::UNKNOWN;
   }
@@ -136,14 +150,15 @@ static void publishSnapshot() {
   snprintf(next.homingState, sizeof(next.homingState), "%s", homingStateText());
   next.safetyFault = safetyFaultIsActive();
   snprintf(next.safetyReason, sizeof(next.safetyReason), "%s", safetyFaultText());
+  getAuxServoState(next.auxServoEnabled, next.auxServoPulseUs, next.auxServoAngleDeg);
   next.stampMs = now;
 
-  for (size_t i = 0; i < 4; i++) {
+  for (size_t i = 0; i < ROBOT_MOTOR_COUNT; i++) {
     const MotorNode &motor = motors[i];
     next.encoder[i] = motor.encoderOk ? motor.encoder : 0;
     next.rawDiagnosticEncoder[i] = motor.rawEncoderOk ? motor.diagnosticRawEncoder : 0;
-    next.motorPositionMm[i] = motor.encoderOk ? encoderCountsToMm(motor.encoder) : 0.0f;
-    next.motorVelocityMmS[i] = motor.encoderOk ? motor.velocityMmS : 0.0f;
+    next.motorPositionMm[i] = motor.encoderOk ? motorPositionUnits(motor) : 0.0f;
+    next.motorVelocityMmS[i] = motor.encoderOk ? motorVelocityUnitsPerS(motor) : 0.0f;
     next.motorRpm[i] = motor.rpmOk ? motor.rpm : 0;
     next.angleError[i] = motor.angleErrorOk ? motor.angleError : 0;
     next.lastAcc[i] = motor.lastAcc;
@@ -171,12 +186,16 @@ static void publishSnapshot() {
 static void processRobotCommand(const RobotCommand &command) {
   switch (command.type) {
     case RobotCommandType::MOVE_XYZ: {
-      const bool accepted = commandMoveXYZMm(
+      const bool accepted = commandMoveXYZAMmDeg(
           command.xMm,
           command.yMm,
           command.zMm,
+          command.useA,
+          command.aDeg,
           command.speedMmS,
-          command.accelMmS2);
+          command.accelMmS2,
+          command.angularSpeedDegS,
+          command.angularAccelDegS2);
       setMoveCommandStatus(command.id, accepted);
       break;
     }
@@ -218,6 +237,15 @@ static void processRobotCommand(const RobotCommand &command) {
       break;
     case RobotCommandType::RELEASE_STALL:
       setControlCommandStatus(command.id, commandReleaseStallAxis(axisFromCommand(command.axis)));
+      break;
+    case RobotCommandType::AUX_SERVO_ANGLE:
+      setControlCommandStatus(command.id, commandSetAuxServoAngle(command.xMm));
+      break;
+    case RobotCommandType::AUX_SERVO_PULSE_US:
+      setControlCommandStatus(command.id, commandSetAuxServoPulseUs(command.pulseUs));
+      break;
+    case RobotCommandType::AUX_SERVO_DISABLE:
+      setControlCommandStatus(command.id, commandDisableAuxServo());
       break;
   }
 }
@@ -298,7 +326,17 @@ bool getRobotStateSnapshot(RobotStateSnapshot &snapshot) {
   return snapshot.stampMs > 0;
 }
 
-bool robotRequestMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float accelMmS2, uint32_t &commandId) {
+bool robotRequestMoveXYZAMmDeg(
+    float xMm,
+    float yMm,
+    float zMm,
+    bool useA,
+    float aDeg,
+    float speedMmS,
+    float accelMmS2,
+    float angularSpeedDegS,
+    float angularAccelDegS2,
+    uint32_t &commandId) {
   if (!robotCommandQueue) return false;
 
   RobotCommand command;
@@ -308,6 +346,10 @@ bool robotRequestMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, floa
   command.zMm = zMm;
   command.speedMmS = speedMmS;
   command.accelMmS2 = accelMmS2;
+  command.useA = useA;
+  command.aDeg = aDeg;
+  command.angularSpeedDegS = angularSpeedDegS;
+  command.angularAccelDegS2 = angularAccelDegS2;
 
   command.id = allocateCommandId();
 
@@ -316,6 +358,10 @@ bool robotRequestMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, floa
   commandId = command.id;
   setMoveCommandPending(command.id);
   return true;
+}
+
+bool robotRequestMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float accelMmS2, uint32_t &commandId) {
+  return robotRequestMoveXYZAMmDeg(xMm, yMm, zMm, false, 0.0f, speedMmS, accelMmS2, 0.0f, 0.0f, commandId);
 }
 
 static bool enqueueControlCommand(RobotCommand &command, uint32_t &commandId) {
@@ -393,6 +439,26 @@ bool robotRequestReleaseStall(uint8_t axis, uint32_t &commandId) {
   RobotCommand command;
   command.type = RobotCommandType::RELEASE_STALL;
   command.axis = axis;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotRequestAuxServoAngle(float angleDeg, uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::AUX_SERVO_ANGLE;
+  command.xMm = angleDeg;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotRequestAuxServoPulseUs(uint16_t pulseUs, uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::AUX_SERVO_PULSE_US;
+  command.pulseUs = pulseUs;
+  return enqueueControlCommand(command, commandId);
+}
+
+bool robotRequestAuxServoDisable(uint32_t &commandId) {
+  RobotCommand command;
+  command.type = RobotCommandType::AUX_SERVO_DISABLE;
   return enqueueControlCommand(command, commandId);
 }
 

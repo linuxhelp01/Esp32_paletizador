@@ -17,11 +17,12 @@ static NullDebugSerial DebugSerial;
 #define DebugSerial Serial
 #endif
 
-MotorNode motors[4] = {
+MotorNode motors[ROBOT_MOTOR_COUNT] = {
   MotorNode("X1", CAN_ID_PHYSICAL_Y1, MOTOR_DIR_PHYSICAL_Y1),
   MotorNode("X2", CAN_ID_PHYSICAL_Y2, MOTOR_DIR_PHYSICAL_Y2),
   MotorNode("Y", CAN_ID_PHYSICAL_X, MOTOR_DIR_PHYSICAL_X),
   MotorNode("Z", CAN_ID_Z, MOTOR_DIR_Z),
+  MotorNode("A", CAN_ID_A, MOTOR_DIR_A, true),
 };
 
 static uint32_t lastEncoderPollMs = 0;
@@ -66,7 +67,7 @@ enum class HomingPhase : uint8_t {
 struct HomingSequenceState {
   bool active = false;
   Axis requestedAxis = Axis::UNKNOWN;
-  Axis axes[3] = {Axis::UNKNOWN, Axis::UNKNOWN, Axis::UNKNOWN};
+  Axis axes[4] = {Axis::UNKNOWN, Axis::UNKNOWN, Axis::UNKNOWN, Axis::UNKNOWN};
   uint8_t axisCount = 0;
   uint8_t axisIndex = 0;
   HomingPhase phase = HomingPhase::IDLE;
@@ -79,8 +80,11 @@ struct HomingSequenceState {
   char stateText[48] = "idle";
 };
 
-static AxisLimitState axisLimits[3];
+static AxisLimitState axisLimits[ROBOT_LINEAR_AXIS_COUNT];
 static HomingSequenceState homing;
+static bool auxServoEnabled = false;
+static uint16_t auxServoPulseUs = AUX_SERVO_CENTER_US;
+static float auxServoAngleDeg = 90.0f;
 
 static String nextToken(String &line) {
   line.trim();
@@ -128,6 +132,8 @@ static const char *axisName(Axis axis) {
       return "Y";
     case Axis::Z:
       return "Z";
+    case Axis::A:
+      return "A";
     case Axis::ALL:
       return "ALL";
     default:
@@ -136,7 +142,7 @@ static const char *axisName(Axis axis) {
 }
 
 static uint8_t motorIndex(const MotorNode &motor) {
-  for (uint8_t i = 0; i < 4; i++) {
+  for (uint8_t i = 0; i < ROBOT_MOTOR_COUNT; i++) {
     if (&motors[i] == &motor) return i;
   }
   return 0;
@@ -150,8 +156,10 @@ static uint8_t homeDirectionForMotor(const MotorNode &motor) {
       return HOME_DIRECTION_X2;
     case 2:
       return HOME_DIRECTION_Y;
-    default:
+    case 3:
       return HOME_DIRECTION_Z;
+    default:
+      return HOME_DIRECTION_A;
   }
 }
 
@@ -313,7 +321,7 @@ static bool axisIsSafeForMotion(Axis axis) {
     return false;
   }
   if (axis == Axis::X) return isXPairAligned();
-  return axis == Axis::Y || axis == Axis::Z || axis == Axis::ALL;
+  return axis == Axis::Y || axis == Axis::Z || axis == Axis::A || axis == Axis::ALL;
 }
 
 static void setXPairExpectedDirectionFromSpeed(int32_t rpm) {
@@ -392,6 +400,7 @@ Axis parseAxis(String token) {
   if (token == "X2") return Axis::X2;
   if (token == "Y") return Axis::Y;
   if (token == "Z") return Axis::Z;
+  if (token == "A" || token == "R" || token == "ROT") return Axis::A;
   if (token == "ALL" || token == "TODOS") return Axis::ALL;
   return Axis::UNKNOWN;
 }
@@ -415,12 +424,52 @@ int32_t mmToEncoderCounts(float mm) {
   return static_cast<int32_t>(roundf(counts));
 }
 
+int32_t degToEncoderCounts(float deg) {
+  const float counts = deg * ENCODER_COUNTS_PER_DEG;
+  if (counts > MAX_INT24) return MAX_INT24;
+  if (counts < MIN_INT24) return MIN_INT24;
+  return static_cast<int32_t>(roundf(counts));
+}
+
 float encoderCountsToMm(int64_t encoderCounts) {
   return static_cast<float>(encoderCounts) / ENCODER_COUNTS_PER_MM;
 }
 
+float encoderCountsToDeg(int64_t encoderCounts) {
+  return static_cast<float>(encoderCounts) / ENCODER_COUNTS_PER_DEG;
+}
+
+float encoderCountsToRad(int64_t encoderCounts) {
+  return encoderCountsToDeg(encoderCounts) * PI / 180.0f;
+}
+
+float motorPositionUnits(const MotorNode &motor) {
+  return motor.rotaryAxis ? encoderCountsToDeg(motor.encoder) : encoderCountsToMm(motor.encoder);
+}
+
+float motorVelocityUnitsPerS(const MotorNode &motor) {
+  return motor.velocityMmS;
+}
+
+float motorJointPosition(const MotorNode &motor) {
+  return motor.rotaryAxis ? encoderCountsToRad(motor.encoder) : encoderCountsToMm(motor.encoder) / 1000.0f;
+}
+
+float motorJointVelocity(const MotorNode &motor) {
+  return motor.rotaryAxis ? motor.velocityMmS * PI / 180.0f : motor.velocityMmS / 1000.0f;
+}
+
+const char *motorPositionUnit(const MotorNode &motor) {
+  return motor.rotaryAxis ? "deg" : "mm";
+}
+
 uint16_t linearSpeedMmSToRpm(float speedMmS) {
   const float rpm = abs(speedMmS) * 60.0f / LEADSCREW_MM_PER_REV;
+  return clampRpm(static_cast<int32_t>(roundf(rpm)));
+}
+
+uint16_t angularSpeedDegSToRpm(float speedDegS) {
+  const float rpm = abs(speedDegS) / 6.0f;
   return clampRpm(static_cast<int32_t>(roundf(rpm)));
 }
 
@@ -437,6 +486,11 @@ uint8_t angularAccelRpmSToMksAcc(float rpmPerS) {
 
 uint8_t linearAccelMmS2ToMksAcc(float mmPerS2) {
   const float rpmPerS = abs(mmPerS2) * 60.0f / LEADSCREW_MM_PER_REV;
+  return angularAccelRpmSToMksAcc(rpmPerS);
+}
+
+uint8_t angularAccelDegS2ToMksAcc(float degPerS2) {
+  const float rpmPerS = abs(degPerS2) / 6.0f;
   return angularAccelRpmSToMksAcc(rpmPerS);
 }
 
@@ -540,6 +594,14 @@ bool isAtXYZMm(float xMm, float yMm, float zMm, float toleranceMm) {
          fabsf(currentZ - zMm) <= toleranceMm;
 }
 
+bool isAtXYZAMmDeg(float xMm, float yMm, float zMm, bool useA, float aDeg, float toleranceMm, float angularToleranceDeg) {
+  if (!isAtXYZMm(xMm, yMm, zMm, toleranceMm)) return false;
+  if (!useA) return true;
+  if (!motors[4].encoderOk) return false;
+  const float currentA = motorPositionUnits(motors[4]);
+  return fabsf(currentA - aDeg) <= angularToleranceDeg;
+}
+
 static bool commandConfigureHome(MotorNode &motor, uint16_t rpm) {
   rpm = clampRpm(rpm);
   const uint8_t cmd[] = {
@@ -612,7 +674,7 @@ static bool configureHomingAxes(Axis axis) {
     homing.axisCount = 3;
     return true;
   }
-  if (axis == Axis::X || axis == Axis::Y || axis == Axis::Z) {
+  if (axis == Axis::X || axis == Axis::Y || axis == Axis::Z || axis == Axis::A) {
     homing.axes[0] = axis;
     homing.axisCount = 1;
     return true;
@@ -721,6 +783,7 @@ bool commandGoOriginAxis(Axis axis) {
 bool commandSetZeroAxis(Axis axis, bool configureLimits, float minMm, float maxMm) {
   if (!safetyAllowsMotion() || homing.active) return false;
   if (axis == Axis::X1 || axis == Axis::X2 || axis == Axis::ALL || axis == Axis::UNKNOWN) return false;
+  if (axis == Axis::A && configureLimits) return false;
   if (configureLimits && !setAxisLimits(axis, minMm, maxMm)) return false;
   if (!axisIsEnabledAndClear(axis)) return false;
   if (axis == Axis::X && !isXPairAligned()) return false;
@@ -730,7 +793,7 @@ bool commandSetZeroAxis(Axis axis, bool configureLimits, float minMm, float maxM
 }
 
 bool commandSetAxisLimits(Axis axis, float minMm, float maxMm) {
-  if (axis == Axis::ALL || axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) return false;
+  if (axis == Axis::ALL || axis == Axis::A || axis == Axis::X1 || axis == Axis::X2 || axis == Axis::UNKNOWN) return false;
   return setAxisLimits(axis, minMm, maxMm);
 }
 
@@ -819,30 +882,48 @@ static bool commandAbsolutePosition(MotorNode &motor, int32_t encoderTarget, uin
   return ok;
 }
 
-bool commandMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float accelMmS2) {
+bool commandMoveXYZAMmDeg(
+    float xMm,
+    float yMm,
+    float zMm,
+    bool useA,
+    float aDeg,
+    float speedMmS,
+    float accelMmS2,
+    float angularSpeedDegS,
+    float angularAccelDegS2) {
   const int32_t xTarget = mmToEncoderCounts(xMm);
   const int32_t yTarget = mmToEncoderCounts(yMm);
   const int32_t zTarget = mmToEncoderCounts(zMm);
-  const uint16_t rpm = speedMmS > 0.0f ? linearSpeedMmSToRpm(speedMmS) : DEFAULT_RPM;
-  const uint8_t acc = accelMmS2 > 0.0f ? linearAccelMmS2ToMksAcc(accelMmS2) : DEFAULT_ACC;
+  const int32_t aTarget = degToEncoderCounts(aDeg);
+  const uint16_t linearRpm = speedMmS > 0.0f ? linearSpeedMmSToRpm(speedMmS) : DEFAULT_RPM;
+  const uint8_t linearAcc = accelMmS2 > 0.0f ? linearAccelMmS2ToMksAcc(accelMmS2) : DEFAULT_ACC;
+  const uint16_t angularRpm = angularSpeedDegS > 0.0f ? angularSpeedDegSToRpm(angularSpeedDegS) : DEFAULT_RPM;
+  const uint8_t angularAcc = angularAccelDegS2 > 0.0f ? angularAccelDegS2ToMksAcc(angularAccelDegS2) : DEFAULT_ACC;
 
   if (!safetyAllowsMotion() || !isXPairAligned()) return false;
   if (homing.active) return false;
   if (!axisIsEnabledAndClear(Axis::ALL)) return false;
+  if (useA && !axisIsEnabledAndClear(Axis::A)) return false;
   if (!xyzWithinSoftwareLimits(xMm, yMm, zMm)) return false;
 
   setXPairExpectedDirectionFromTarget(xTarget);
   bool ok = commandPrepareSynchronizedMove();
-  ok &= commandAbsolutePosition(motors[0], xTarget, rpm, acc);
-  ok &= commandAbsolutePosition(motors[1], xTarget, rpm, acc);
-  ok &= commandAbsolutePosition(motors[2], yTarget, rpm, acc);
-  ok &= commandAbsolutePosition(motors[3], zTarget, rpm, acc);
+  ok &= commandAbsolutePosition(motors[0], xTarget, linearRpm, linearAcc);
+  ok &= commandAbsolutePosition(motors[1], xTarget, linearRpm, linearAcc);
+  ok &= commandAbsolutePosition(motors[2], yTarget, linearRpm, linearAcc);
+  ok &= commandAbsolutePosition(motors[3], zTarget, linearRpm, linearAcc);
+  if (useA) ok &= commandAbsolutePosition(motors[4], aTarget, angularRpm, angularAcc);
   if (ok) ok &= commandSyncTrigger();
   if (!ok) {
     xPairMotionMonitoringActive = false;
     xPairExpectedDirection = 0;
   }
   return ok;
+}
+
+bool commandMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float accelMmS2) {
+  return commandMoveXYZAMmDeg(xMm, yMm, zMm, false, 0.0f, speedMmS, accelMmS2, 0.0f, 0.0f);
 }
 
 static bool requestEncoder(const MotorNode &motor) {
@@ -896,8 +977,8 @@ static void handleEncoderReply(MotorNode &motor, const twai_message_t &msg) {
     const uint32_t dtMs = now - motor.lastEncoderUpdateMs;
     if (dtMs > 0) {
       const int64_t delta = (value * motor.direction) - motor.encoder;
-      const float instantVelocityMmS = encoderCountsToMm(delta) * 1000.0f / static_cast<float>(dtMs);
-      motor.velocityMmS = 0.7f * motor.velocityMmS + 0.3f * instantVelocityMmS;
+      const float instantVelocity = (motor.rotaryAxis ? encoderCountsToDeg(delta) : encoderCountsToMm(delta)) * 1000.0f / static_cast<float>(dtMs);
+      motor.velocityMmS = 0.7f * motor.velocityMmS + 0.3f * instantVelocity;
     }
   }
 
@@ -1048,14 +1129,14 @@ void pollEncoders() {
     lastEncoderPollMs = now;
     for (uint8_t i = 0; i < ENCODER_REQUESTS_PER_POLL; i++) {
       requestEncoder(motors[nextEncoderPollMotor]);
-      nextEncoderPollMotor = (nextEncoderPollMotor + 1) % 4;
+      nextEncoderPollMotor = (nextEncoderPollMotor + 1) % ROBOT_MOTOR_COUNT;
     }
   }
 
   if (now - lastSpeedPollMs >= SPEED_POLL_MS) {
     lastSpeedPollMs = now;
     requestSpeed(motors[nextSpeedPollMotor]);
-    nextSpeedPollMotor = (nextSpeedPollMotor + 1) % 4;
+    nextSpeedPollMotor = (nextSpeedPollMotor + 1) % ROBOT_MOTOR_COUNT;
   }
 
   if (homing.active && now - lastHomeStatusPollMs >= HOME_STATUS_POLL_MS) {
@@ -1070,25 +1151,25 @@ void pollEncoders() {
   if (!homing.active && now - lastRawEncoderPollMs >= RAW_ENCODER_DIAGNOSTIC_POLL_MS) {
     lastRawEncoderPollMs = now;
     requestRawEncoder(motors[nextRawEncoderPollMotor]);
-    nextRawEncoderPollMotor = (nextRawEncoderPollMotor + 1) % 4;
+    nextRawEncoderPollMotor = (nextRawEncoderPollMotor + 1) % ROBOT_MOTOR_COUNT;
   }
 
   if (now - lastAngleErrorPollMs >= ANGLE_ERROR_POLL_MS) {
     lastAngleErrorPollMs = now;
     requestAngleError(motors[nextAngleErrorPollMotor]);
-    nextAngleErrorPollMotor = (nextAngleErrorPollMotor + 1) % 4;
+    nextAngleErrorPollMotor = (nextAngleErrorPollMotor + 1) % ROBOT_MOTOR_COUNT;
   }
 
   if (now - lastEnableStatusPollMs >= ENABLE_STATUS_POLL_MS) {
     lastEnableStatusPollMs = now;
     requestEnableStatus(motors[nextEnablePollMotor]);
-    nextEnablePollMotor = (nextEnablePollMotor + 1) % 4;
+    nextEnablePollMotor = (nextEnablePollMotor + 1) % ROBOT_MOTOR_COUNT;
   }
 
   if (now - lastStallStatusPollMs >= STALL_STATUS_POLL_MS) {
     lastStallStatusPollMs = now;
     requestStallStatus(motors[nextStallPollMotor]);
-    nextStallPollMotor = (nextStallPollMotor + 1) % 4;
+    nextStallPollMotor = (nextStallPollMotor + 1) % ROBOT_MOTOR_COUNT;
   }
 }
 
@@ -1202,9 +1283,9 @@ void printHelp() {
   DebugSerial.println();
   DebugSerial.println("Comandos:");
   DebugSerial.println("  HELLO");
-  DebugSerial.println("  POS <X|Y|Z> <encoder_abs> [rpm] [acc]");
+  DebugSerial.println("  POS <X|Y|Z|A> <encoder_abs> [rpm] [acc]");
   DebugSerial.println("      Posicion angular absoluta del motor en cuentas de encoder.");
-  DebugSerial.println("  POSANG <X|Y|Z> <encoder_abs> [rpm] [rpm_s]");
+  DebugSerial.println("  POSANG <X|Y|Z|A> <encoder_abs> [rpm] [rpm_s]");
   DebugSerial.println("      Posicion angular. En X mueve X1/X2 juntos.");
   DebugSerial.println("  POSMM <X|Y|Z> <mm_abs> [rpm] [acc]");
   DebugSerial.println("      Posicion lineal absoluta del extremo del robot en milimetros.");
@@ -1214,16 +1295,18 @@ void printHelp() {
   DebugSerial.println("      Movimiento lineal coordinado XYZ con disparo broadcast 4Bh.");
   DebugSerial.println("  SYNC <0|1>         (configura marca sincronizada MKS 4Ah por broadcast)");
   DebugSerial.println("  TRIGGER            (disparo sincronizado MKS 4Bh por broadcast)");
-  DebugSerial.println("  VEL <X|Y|Z> <rpm> [acc]");
-  DebugSerial.println("  VELANG <X|Y|Z> <rpm> [rpm_s]");
-  DebugSerial.println("  HOME <X|Y|Z|ALL> [min_mm max_mm] [fast_rpm slow_rpm]");
+  DebugSerial.println("  VEL <X|Y|Z|A> <rpm> [acc]");
+  DebugSerial.println("  VELANG <X|Y|Z|A> <rpm> [rpm_s]");
+  DebugSerial.println("  HOME <X|Y|Z|A|ALL> [min_mm max_mm] [fast_rpm slow_rpm]");
   DebugSerial.println("      0x91 0x00 doble pasada: rapida y luego lenta.");
-  DebugSerial.println("  ORIGIN <X|Y|Z|ALL>");
+  DebugSerial.println("  ORIGIN <X|Y|Z|A|ALL>");
   DebugSerial.println("      0x91 0x01: vuelve al origen de coordenadas ya definido.");
   DebugSerial.println("  ZERO <X|Y|Z> <min_mm> <max_mm>");
   DebugSerial.println("      0x92: define cero actual y limites de software del eje.");
-  DebugSerial.println("  ENABLE <X|Y|Z|ALL>");
-  DebugSerial.println("  DISABLE <X|Y|Z|ALL>");
+  DebugSerial.println("  ENABLE <X|Y|Z|A|ALL>");
+  DebugSerial.println("  DISABLE <X|Y|Z|A|ALL>");
+  DebugSerial.println("  SERVO <deg|OFF>     (servo PWM auxiliar por angulo 0..180)");
+  DebugSerial.println("  SERVO_US <us>       (servo PWM auxiliar por pulso en microsegundos)");
   DebugSerial.println("  PING              (fuerza consulta CAN a todos los motores)");
   DebugSerial.println("  STOP");
   DebugSerial.println("  FAULT STATUS      (muestra el estado de seguridad)");
@@ -1270,13 +1353,13 @@ void printStatus() {
     DebugSerial.print(" angularEnc=");
     if (motor.encoderOk) DebugSerial.print(motor.encoder);
     else DebugSerial.print("?");
-    DebugSerial.print(" linearMm=");
-    if (motor.encoderOk) DebugSerial.print(encoderCountsToMm(motor.encoder), 3);
+    DebugSerial.print(" pos=");
+    if (motor.encoderOk) DebugSerial.print(motorPositionUnits(motor), 3);
     else DebugSerial.print("?");
     DebugSerial.print(" rpm=");
     if (motor.rpmOk) DebugSerial.print(motor.rpm);
     else DebugSerial.print("?");
-    DebugSerial.print(" velMmS=");
+    DebugSerial.print(" vel=");
     if (motor.encoderOk) DebugSerial.print(motor.velocityMmS, 3);
     else DebugSerial.print("?");
     DebugSerial.print(" angleErr=");
@@ -1306,6 +1389,65 @@ void printStatus() {
     if (motor.rawEncoderOk) DebugSerial.println(motor.diagnosticRawEncoder);
     else DebugSerial.println("?");
   }
+  DebugSerial.print("  auxServo enabled=");
+  DebugSerial.print(auxServoEnabled ? 1 : 0);
+  DebugSerial.print(" pulseUs=");
+  DebugSerial.print(auxServoPulseUs);
+  DebugSerial.print(" angleDeg=");
+  DebugSerial.println(auxServoAngleDeg, 1);
+}
+
+static uint32_t auxServoDutyFromPulseUs(uint16_t pulseUs) {
+  const uint32_t maxDuty = (1UL << AUX_SERVO_PWM_RES_BITS) - 1UL;
+  return static_cast<uint32_t>((static_cast<uint64_t>(pulseUs) * maxDuty) / 20000ULL);
+}
+
+static void writeAuxServoPulse(uint16_t pulseUs) {
+  const uint32_t duty = auxServoDutyFromPulseUs(pulseUs);
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(static_cast<uint8_t>(AUX_SERVO_PWM_PIN), duty);
+#else
+  ledcWrite(AUX_SERVO_PWM_CHANNEL, duty);
+#endif
+}
+
+bool commandSetAuxServoPulseUs(uint16_t pulseUs) {
+  if (pulseUs < AUX_SERVO_MIN_US) pulseUs = AUX_SERVO_MIN_US;
+  if (pulseUs > AUX_SERVO_MAX_US) pulseUs = AUX_SERVO_MAX_US;
+  auxServoPulseUs = pulseUs;
+  auxServoAngleDeg = AUX_SERVO_MIN_DEG +
+                     (static_cast<float>(pulseUs - AUX_SERVO_MIN_US) *
+                      (AUX_SERVO_MAX_DEG - AUX_SERVO_MIN_DEG) /
+                      static_cast<float>(AUX_SERVO_MAX_US - AUX_SERVO_MIN_US));
+  auxServoEnabled = true;
+  writeAuxServoPulse(auxServoPulseUs);
+  return true;
+}
+
+bool commandSetAuxServoAngle(float angleDeg) {
+  if (angleDeg < AUX_SERVO_MIN_DEG) angleDeg = AUX_SERVO_MIN_DEG;
+  if (angleDeg > AUX_SERVO_MAX_DEG) angleDeg = AUX_SERVO_MAX_DEG;
+  const float spanUs = static_cast<float>(AUX_SERVO_MAX_US - AUX_SERVO_MIN_US);
+  const float spanDeg = AUX_SERVO_MAX_DEG - AUX_SERVO_MIN_DEG;
+  const uint16_t pulseUs = static_cast<uint16_t>(roundf(AUX_SERVO_MIN_US + ((angleDeg - AUX_SERVO_MIN_DEG) * spanUs / spanDeg)));
+  return commandSetAuxServoPulseUs(pulseUs);
+}
+
+bool commandDisableAuxServo() {
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWrite(static_cast<uint8_t>(AUX_SERVO_PWM_PIN), 0);
+#else
+  ledcWrite(AUX_SERVO_PWM_CHANNEL, 0);
+#endif
+  auxServoEnabled = false;
+  return true;
+}
+
+bool getAuxServoState(bool &enabled, uint16_t &pulseUs, float &angleDeg) {
+  enabled = auxServoEnabled;
+  pulseUs = auxServoPulseUs;
+  angleDeg = auxServoAngleDeg;
+  return true;
 }
 
 static void reportCommandResult(const char *label, bool ok) {
@@ -1525,6 +1667,23 @@ void handleMachineCommand(String line) {
     return;
   }
 
+  if (command == "SERVO") {
+    String value = nextToken(line);
+    value.toUpperCase();
+    if (value == "OFF" || value == "0FF") {
+      reportCommandResult("SERVO", commandDisableAuxServo());
+      return;
+    }
+    reportCommandResult("SERVO", commandSetAuxServoAngle(value.toFloat()));
+    return;
+  }
+
+  if (command == "SERVO_US") {
+    const uint16_t pulseUs = static_cast<uint16_t>(nextToken(line).toInt());
+    reportCommandResult("SERVO_US", commandSetAuxServoPulseUs(pulseUs));
+    return;
+  }
+
   if (command == "HOME") {
     Axis axis = parseAxis(nextToken(line));
     bool configureLimits = false;
@@ -1584,6 +1743,14 @@ void handleMachineCommand(String line) {
 
 bool beginMachine() {
   if (!mks::begin()) return false;
+
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(static_cast<uint8_t>(AUX_SERVO_PWM_PIN), AUX_SERVO_PWM_FREQ_HZ, AUX_SERVO_PWM_RES_BITS);
+#else
+  ledcSetup(AUX_SERVO_PWM_CHANNEL, AUX_SERVO_PWM_FREQ_HZ, AUX_SERVO_PWM_RES_BITS);
+  ledcAttachPin(static_cast<uint8_t>(AUX_SERVO_PWM_PIN), AUX_SERVO_PWM_CHANNEL);
+#endif
+  commandSetAuxServoPulseUs(AUX_SERVO_CENTER_US);
 
   commandSetBusFocModeBroadcast();
   delay(20);

@@ -2,12 +2,15 @@
 
 #include <Arduino.h>
 
+#include "config.h"
+
 enum class Axis : uint8_t {
   X,
   X1,
   X2,
   Y,
   Z,
+  A,
   ALL,
   UNKNOWN
 };
@@ -42,12 +45,13 @@ struct MotorNode {
   bool homeCommandOk = false;
   bool homeStatusOk = false;
   uint32_t lastSeenMs = 0;
+  bool rotaryAxis = false;
 
-  MotorNode(const char *nodeName, uint16_t nodeCanId, int8_t nodeDirection)
-      : name(nodeName), canId(nodeCanId), direction(nodeDirection) {}
+  MotorNode(const char *nodeName, uint16_t nodeCanId, int8_t nodeDirection, bool nodeRotaryAxis = false)
+      : name(nodeName), canId(nodeCanId), direction(nodeDirection), rotaryAxis(nodeRotaryAxis) {}
 };
 
-extern MotorNode motors[4];
+extern MotorNode motors[ROBOT_MOTOR_COUNT];
 
 bool beginMachine();
 void pollEncoders();
@@ -58,11 +62,16 @@ bool safetyFaultIsActive();
 const char *safetyFaultText();
 bool motorIsOnline(const MotorNode &motor, uint32_t nowMs);
 bool commandMoveXYZMm(float xMm, float yMm, float zMm, float speedMmS, float accelMmS2);
+bool commandMoveXYZAMmDeg(float xMm, float yMm, float zMm, bool useA, float aDeg, float speedMmS, float accelMmS2, float angularSpeedDegS, float angularAccelDegS2);
 bool startHomeAxis(Axis axis, bool configureLimits, float minMm, float maxMm, uint16_t fastRpm, uint16_t slowRpm);
 bool commandGoOriginAxis(Axis axis);
 bool commandSetZeroAxis(Axis axis, bool configureLimits, float minMm, float maxMm);
 bool commandSetAxisLimits(Axis axis, float minMm, float maxMm);
 bool commandSetAxisEnable(Axis axis, bool enable);
+bool commandSetAuxServoAngle(float angleDeg);
+bool commandSetAuxServoPulseUs(uint16_t pulseUs);
+bool commandDisableAuxServo();
+bool getAuxServoState(bool &enabled, uint16_t &pulseUs, float &angleDeg);
 bool commandClearSafetyFault();
 bool commandReleaseStallAxis(Axis axis);
 bool axisLimitsAreConfigured(Axis axis);
@@ -72,6 +81,7 @@ const char *homingStateText();
 void getAxisPositionsMm(float &xMm, float &yMm, float &zMm);
 bool axisPositionsAreValid();
 bool isAtXYZMm(float xMm, float yMm, float zMm, float toleranceMm);
+bool isAtXYZAMmDeg(float xMm, float yMm, float zMm, bool useA, float aDeg, float toleranceMm, float angularToleranceDeg);
 
 void printHelp();
 void printStatus();
@@ -81,10 +91,20 @@ Axis parseAxis(String token);
 uint16_t clampRpm(int32_t rpm);
 uint8_t clampAcc(int32_t acc);
 int32_t mmToEncoderCounts(float mm);
+int32_t degToEncoderCounts(float deg);
 float encoderCountsToMm(int64_t encoderCounts);
+float encoderCountsToDeg(int64_t encoderCounts);
+float encoderCountsToRad(int64_t encoderCounts);
+float motorPositionUnits(const MotorNode &motor);
+float motorVelocityUnitsPerS(const MotorNode &motor);
+float motorJointPosition(const MotorNode &motor);
+float motorJointVelocity(const MotorNode &motor);
+const char *motorPositionUnit(const MotorNode &motor);
 uint16_t linearSpeedMmSToRpm(float speedMmS);
+uint16_t angularSpeedDegSToRpm(float speedDegS);
 uint8_t angularAccelRpmSToMksAcc(float rpmPerS);
 uint8_t linearAccelMmS2ToMksAcc(float mmPerS2);
+uint8_t angularAccelDegS2ToMksAcc(float degPerS2);
 
 template <typename Callback>
 bool forEachMotorInAxis(Axis axis, Callback callback) {
@@ -94,11 +114,20 @@ bool forEachMotorInAxis(Axis axis, Callback callback) {
       ok &= callback(motors[0]);
       ok &= callback(motors[1]);
       break;
+    case Axis::X1:
+      ok &= callback(motors[0]);
+      break;
+    case Axis::X2:
+      ok &= callback(motors[1]);
+      break;
     case Axis::Y:
       ok &= callback(motors[2]);
       break;
     case Axis::Z:
       ok &= callback(motors[3]);
+      break;
+    case Axis::A:
+      ok &= callback(motors[4]);
       break;
     case Axis::ALL:
       ok &= callback(motors[0]);

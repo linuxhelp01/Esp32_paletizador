@@ -3,10 +3,17 @@ float32 x_mm
 float32 y_mm
 float32 z_mm
 
+# Optional rotary A-axis setpoint in degrees. When use_a is false, A is not moved.
+bool use_a
+float32 a_deg
+
 # Optional motion tuning. Values <= 0 use firmware defaults.
 float32 speed_mm_s
 float32 accel_mm_s2
+float32 angular_speed_deg_s
+float32 angular_accel_deg_s2
 float32 tolerance_mm
+float32 angular_tolerance_deg
 uint32 timeout_ms
 ---
 bool success
@@ -14,12 +21,15 @@ string message
 float32 final_x_mm
 float32 final_y_mm
 float32 final_z_mm
+float32 final_a_deg
 ---
 float32 current_x_mm
 float32 current_y_mm
 float32 current_z_mm
+float32 current_a_deg
 float32 error_x_mm
 float32 error_y_mm
 float32 error_z_mm
+float32 error_a_deg
 float32 progress
 string state

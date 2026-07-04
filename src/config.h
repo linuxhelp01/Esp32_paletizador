@@ -11,6 +11,11 @@
 #error "This firmware must be compiled with micro-ROS enabled"
 #endif
 
+// Dimensiones logicas del robot. X usa dos drivers fisicos: X1/X2.
+static constexpr size_t ROBOT_MOTOR_COUNT = 5;
+static constexpr size_t ROBOT_CARTESIAN_MOTOR_COUNT = 4;
+static constexpr size_t ROBOT_LINEAR_AXIS_COUNT = 3;
+
 // Pines ESP32-S3 hacia transceiver CAN, por ejemplo SN65HVD230.
 static constexpr gpio_num_t CAN_TX = GPIO_NUM_5;
 static constexpr gpio_num_t CAN_RX = GPIO_NUM_4;
@@ -23,6 +28,7 @@ static constexpr uint16_t CAN_ID_PHYSICAL_X = 0x01;
 static constexpr uint16_t CAN_ID_PHYSICAL_Y1 = 0x02;
 static constexpr uint16_t CAN_ID_PHYSICAL_Y2 = 0x03;
 static constexpr uint16_t CAN_ID_Z = 0x04;
+static constexpr uint16_t CAN_ID_A = 0x05;  // Eje rotatorio MKS Servo42D.
 
 static constexpr uint16_t MAX_RPM = 3000;
 static constexpr uint8_t MAX_ACC = 255;
@@ -30,8 +36,8 @@ static constexpr uint8_t DEFAULT_ACC = 10;
 static constexpr uint16_t DEFAULT_RPM = 500;
 // Muestreo de posicion para movimientos rapidos:
 // a 1000 mm/s el eje recorre 1 mm cada 1 ms. Se solicitan 2 lecturas 0x31 por
-// ciclo de 1 ms; con 4 motores, cada motor queda actualizado cada ~2 ms
-// (500 Hz por motor). La telemetria secundaria queda mas lenta para reservar
+// ciclo de 1 ms; con 5 motores, cada motor queda actualizado cada ~2.5 ms
+// (~400 Hz por motor). La telemetria secundaria queda mas lenta para reservar
 // ancho de banda CAN para posicion.
 static constexpr uint32_t ENCODER_POLL_MS = 1;
 static constexpr uint8_t ENCODER_REQUESTS_PER_POLL = 2;
@@ -81,12 +87,14 @@ static constexpr uint8_t HOME_DIRECTION_X1 = 0;
 static constexpr uint8_t HOME_DIRECTION_X2 = 0;
 static constexpr uint8_t HOME_DIRECTION_Y = 0;
 static constexpr uint8_t HOME_DIRECTION_Z = 0;
+static constexpr uint8_t HOME_DIRECTION_A = 0;
 
 // Husillo: una vuelta completa del motor desplaza linealmente 8 mm.
 // El encoder MKS reporta 16384 cuentas por vuelta.
 static constexpr int32_t ENCODER_COUNTS_PER_REV = 16384;
 static constexpr float LEADSCREW_MM_PER_REV = 8.0f;
 static constexpr float ENCODER_COUNTS_PER_MM = ENCODER_COUNTS_PER_REV / LEADSCREW_MM_PER_REV;
+static constexpr float ENCODER_COUNTS_PER_DEG = ENCODER_COUNTS_PER_REV / 360.0f;
 
 // Sentido logico de cada motor respecto al eje del robot.
 // Si al ordenar un movimiento positivo el encoder corregido baja en vez de subir,
@@ -97,6 +105,18 @@ static constexpr int8_t MOTOR_DIR_PHYSICAL_X = -1;
 static constexpr int8_t MOTOR_DIR_PHYSICAL_Y1 = -1;
 static constexpr int8_t MOTOR_DIR_PHYSICAL_Y2 = -1;
 static constexpr int8_t MOTOR_DIR_Z = 1;
+static constexpr int8_t MOTOR_DIR_A = 1;
+
+// Servo PWM auxiliar tradicional. Ajusta el pin segun el cableado real.
+static constexpr gpio_num_t AUX_SERVO_PWM_PIN = GPIO_NUM_18;
+static constexpr uint8_t AUX_SERVO_PWM_CHANNEL = 0;
+static constexpr uint32_t AUX_SERVO_PWM_FREQ_HZ = 50;
+static constexpr uint8_t AUX_SERVO_PWM_RES_BITS = 16;
+static constexpr uint16_t AUX_SERVO_MIN_US = 500;
+static constexpr uint16_t AUX_SERVO_MAX_US = 2500;
+static constexpr uint16_t AUX_SERVO_CENTER_US = 1500;
+static constexpr float AUX_SERVO_MIN_DEG = 0.0f;
+static constexpr float AUX_SERVO_MAX_DEG = 180.0f;
 
 // Diferencia maxima permitida entre X1 e X2, en cuentas de encoder corregidas.
 // Con 2048 cuentas/mm, 4096 cuentas equivalen a 2.0 mm.
