@@ -41,6 +41,7 @@ export type PalletizerState = {
 export type BackendEvent = {
   type: string;
   state?: PalletizerState;
+  ping?: Record<string, unknown>;
   action?: string;
   feedback?: Record<string, unknown>;
   result?: Record<string, unknown>;

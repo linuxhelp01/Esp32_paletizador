@@ -135,7 +135,8 @@ class PalletizerUiNode(Node):
             key: key in ages and ages[key] <= PALLETIZER_CONNECTION_STALE_MS
             for key in tracked_topics
         }
-        ros_messages = fresh["joint_states"] or fresh["axis_position_mm"] or fresh["motor_rpm"] or fresh["status"]
+        telemetry_messages = fresh["joint_states"] or fresh["axis_position_mm"] or fresh["motor_rpm"] or fresh["status"]
+        motor_state_messages = fresh["status"] and (fresh["joint_states"] or fresh["motor_rpm"])
 
         try:
             node_names = set(self.get_node_names())
@@ -143,13 +144,18 @@ class PalletizerUiNode(Node):
             node_names = set()
         node_seen = "palletizer_controller" in node_names or "/palletizer_controller" in node_names
 
-        esp32_physical = bool(node_seen or ros_messages)
-        ros_communication = bool(ros_messages)
+        # A graph node can remain visible briefly after USB/micro-ROS disconnects.
+        # Treat the ESP32-S3 as physically connected only while fresh telemetry
+        # from the firmware is still arriving.
+        esp32_physical = bool(telemetry_messages)
+        ros_communication = bool(telemetry_messages)
         connections = {
             "esp32_physical": esp32_physical,
             "ros_communication": ros_communication,
+            "palletizer_graph_node": node_seen,
+            "motor_state_messages": motor_state_messages,
             # Backward-compatible aliases used by older frontend panels.
-            "palletizer_node": esp32_physical,
+            "palletizer_node": node_seen,
             "ros_messages": ros_communication,
             **fresh,
         }
@@ -194,8 +200,77 @@ class PalletizerUiNode(Node):
             self._set_aux_servo(message.get("request", {}))
         elif command_type == "set_gripper":
             self._call_set_gripper(message.get("request", {}))
+        elif command_type == "ping":
+            self._handle_ping()
         else:
             self._send({"type": "error", "message": f"unknown command: {command_type}"})
+
+    def _ros_node_seen(self) -> bool:
+        try:
+            node_names = set(self.get_node_names())
+        except Exception:
+            return False
+        return "palletizer_controller" in node_names or "/palletizer_controller" in node_names
+
+    def _ping_report(self, ping_id: int, driver_status: Optional[Dict[str, Any]] = None, error: str = "") -> Dict[str, Any]:
+        connections, ages = self._connection_snapshot()
+        availability = self._availability_snapshot()
+        topic_keys = ["status", "joint_states", "motor_rpm", "axis_position_mm"]
+        topics_ok = all(bool(connections.get(key)) for key in topic_keys)
+        services_ok = bool(availability.get("get_driver_status"))
+        driver_ok = bool(driver_status and driver_status.get("success"))
+        pending_driver_status = services_ok and driver_status is None and not error
+        esp32_ok = bool(connections.get("esp32_physical")) and (driver_ok or pending_driver_status or topics_ok)
+        return {
+            "id": ping_id,
+            "stamp_ms": now_ms(),
+            "ok": bool(connections.get("ros_communication") and esp32_ok),
+            "esp32_ok": esp32_ok,
+            "ros_ok": bool(connections.get("ros_communication")),
+            "graph_node_ok": self._ros_node_seen(),
+            "topics_ok": topics_ok,
+            "driver_status_ok": driver_ok,
+            "driver_status_pending": pending_driver_status,
+            "driver_status_error": error,
+            "command_topic_subscribers": self._command_topic_subscribers(),
+            "connections": connections,
+            "last_seen_age_ms": ages,
+            "availability": availability,
+            "driver_status": driver_status,
+            "message": self._ping_message(connections, topics_ok, services_ok, driver_ok, pending_driver_status, error),
+        }
+
+    def _ping_message(self, connections: Dict[str, bool], topics_ok: bool, services_ok: bool, driver_ok: bool, pending_driver_status: bool, error: str) -> str:
+        if error:
+            return f"get_driver_status fallo: {error}"
+        if driver_ok:
+            return "ESP32 respondio get_driver_status"
+        if pending_driver_status:
+            return "esperando respuesta get_driver_status"
+        if topics_ok:
+            return "telemetria fresca desde ESP32"
+        if connections.get("ros_communication"):
+            return "ROS recibe telemetria parcial"
+        return "sin telemetria fresca desde ESP32"
+
+    def _handle_ping(self) -> None:
+        ping_id = now_ms()
+        report = self._ping_report(ping_id)
+        self._send({"type": "ping_result", "ping": report, "state": self.snapshot()})
+
+        if GetDriverStatus is None or not self._get_driver_status_client or not self._get_driver_status_client.wait_for_service(timeout_sec=0.2):
+            return
+        future = self._get_driver_status_client.call_async(GetDriverStatus.Request())
+        future.add_done_callback(lambda f: self._on_ping_driver_status(ping_id, f))
+
+    def _on_ping_driver_status(self, ping_id: int, future: Any) -> None:
+        try:
+            response = future.result()
+            driver_status = self._service_response_dict(response)
+            report = self._ping_report(ping_id, driver_status=driver_status)
+        except Exception as exc:
+            report = self._ping_report(ping_id, error=str(exc))
+        self._send({"type": "ping_result", "ping": report, "state": self.snapshot()})
 
     def _set_connection(self, key: str) -> None:
         now = now_ms()

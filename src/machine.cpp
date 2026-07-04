@@ -3,6 +3,8 @@
 #include "config.h"
 #include "mks_can.h"
 
+#include <ESP32Servo.h>
+
 #if ENABLE_MICRO_ROS
 struct NullDebugSerial {
   template <typename... Args>
@@ -45,6 +47,7 @@ static bool xPairMotionMonitoringActive = false;
 static int8_t xPairExpectedDirection = 0;
 
 static bool commandStopAll();
+static void serviceAuxServoTestSweep();
 
 struct AxisLimitState {
   bool configured = false;
@@ -85,6 +88,10 @@ static HomingSequenceState homing;
 static bool auxServoEnabled = false;
 static uint16_t auxServoPulseUs = AUX_SERVO_CENTER_US;
 static float auxServoAngleDeg = 90.0f;
+static uint32_t lastAuxServoTestSweepMs = 0;
+static bool auxServoTestSweepHigh = false;
+static Servo auxServo;
+static bool auxServoAttached = false;
 
 static String nextToken(String &line) {
   line.trim();
@@ -1174,6 +1181,8 @@ void pollEncoders() {
 }
 
 void serviceMachine() {
+  serviceAuxServoTestSweep();
+
   if (!homing.active) return;
 
   const uint32_t now = millis();
@@ -1397,18 +1406,16 @@ void printStatus() {
   DebugSerial.println(auxServoAngleDeg, 1);
 }
 
-static uint32_t auxServoDutyFromPulseUs(uint16_t pulseUs) {
-  const uint32_t maxDuty = (1UL << AUX_SERVO_PWM_RES_BITS) - 1UL;
-  return static_cast<uint32_t>((static_cast<uint64_t>(pulseUs) * maxDuty) / 20000ULL);
+static void ensureAuxServoAttached() {
+  if (auxServoAttached) return;
+  auxServo.setPeriodHertz(AUX_SERVO_PWM_FREQ_HZ);
+  auxServo.attach(static_cast<int>(AUX_SERVO_PWM_PIN), AUX_SERVO_MIN_US, AUX_SERVO_MAX_US);
+  auxServoAttached = true;
 }
 
 static void writeAuxServoPulse(uint16_t pulseUs) {
-  const uint32_t duty = auxServoDutyFromPulseUs(pulseUs);
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  ledcWrite(static_cast<uint8_t>(AUX_SERVO_PWM_PIN), duty);
-#else
-  ledcWrite(AUX_SERVO_PWM_CHANNEL, duty);
-#endif
+  ensureAuxServoAttached();
+  auxServo.writeMicroseconds(pulseUs);
 }
 
 bool commandSetAuxServoPulseUs(uint16_t pulseUs) {
@@ -1433,12 +1440,22 @@ bool commandSetAuxServoAngle(float angleDeg) {
   return commandSetAuxServoPulseUs(pulseUs);
 }
 
+static void serviceAuxServoTestSweep() {
+  if (!AUX_SERVO_TEST_SWEEP_ENABLED) return;
+
+  const uint32_t now = millis();
+  if (lastAuxServoTestSweepMs != 0 && now - lastAuxServoTestSweepMs < AUX_SERVO_TEST_SWEEP_PERIOD_MS) return;
+
+  lastAuxServoTestSweepMs = now;
+  auxServoTestSweepHigh = !auxServoTestSweepHigh;
+  commandSetAuxServoAngle(auxServoTestSweepHigh ? AUX_SERVO_MAX_DEG : AUX_SERVO_MIN_DEG);
+}
+
 bool commandDisableAuxServo() {
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  ledcWrite(static_cast<uint8_t>(AUX_SERVO_PWM_PIN), 0);
-#else
-  ledcWrite(AUX_SERVO_PWM_CHANNEL, 0);
-#endif
+  if (auxServoAttached) {
+    auxServo.detach();
+    auxServoAttached = false;
+  }
   auxServoEnabled = false;
   return true;
 }
@@ -1744,12 +1761,7 @@ void handleMachineCommand(String line) {
 bool beginMachine() {
   if (!mks::begin()) return false;
 
-#if defined(ESP_ARDUINO_VERSION_MAJOR) && ESP_ARDUINO_VERSION_MAJOR >= 3
-  ledcAttach(static_cast<uint8_t>(AUX_SERVO_PWM_PIN), AUX_SERVO_PWM_FREQ_HZ, AUX_SERVO_PWM_RES_BITS);
-#else
-  ledcSetup(AUX_SERVO_PWM_CHANNEL, AUX_SERVO_PWM_FREQ_HZ, AUX_SERVO_PWM_RES_BITS);
-  ledcAttachPin(static_cast<uint8_t>(AUX_SERVO_PWM_PIN), AUX_SERVO_PWM_CHANNEL);
-#endif
+  ensureAuxServoAttached();
   commandSetAuxServoPulseUs(AUX_SERVO_CENTER_US);
 
   commandSetBusFocModeBroadcast();

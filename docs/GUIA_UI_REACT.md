@@ -143,7 +143,7 @@ La interfaz contempla un quinto driver fisico como eje rotatorio `A` con CAN ID 
 
 En el panel de homing se puede seleccionar `A rotatorio` y presionar `Home`. Si la action `/palletizer/home_axis` no esta disponible, el backend envia el comando textual `HOME A` por `/palletizer/command`.
 
-El panel `Servo PWM` controla el actuador auxiliar por angulo o pulso en microsegundos. El pin por defecto es `GPIO 18` y se ajusta en `src/config.h`.
+El control de pinza acciona el servo auxiliar por PWM. El pin por defecto es `GPIO 17` y se ajusta en `src/config.h`.
 
 Servicio de pinza/servo:
 

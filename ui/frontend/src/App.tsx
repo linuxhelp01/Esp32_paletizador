@@ -13,11 +13,11 @@ import { TelemetryPanel } from "./components/TelemetryPanel";
 import { usePalletizerSocket } from "./hooks/usePalletizerSocket";
 
 export function App() {
-  const { connected, state, events, lastFeedback, lastResult, send } = usePalletizerSocket();
+  const { connected, state, events, lastFeedback, lastResult, lastPing, send } = usePalletizerSocket();
 
   return (
     <main className="app">
-      <StatusBar connected={connected} state={state} />
+      <StatusBar connected={connected} state={state} lastPing={lastPing} send={send} />
       <div className="operator-grid">
         <aside className="left-rail">
           <SafetyPanel state={state} send={send} />

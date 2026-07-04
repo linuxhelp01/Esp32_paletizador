@@ -107,16 +107,19 @@ static constexpr int8_t MOTOR_DIR_PHYSICAL_Y2 = -1;
 static constexpr int8_t MOTOR_DIR_Z = 1;
 static constexpr int8_t MOTOR_DIR_A = 1;
 
-// Servo PWM auxiliar tradicional. Ajusta el pin segun el cableado real.
-static constexpr gpio_num_t AUX_SERVO_PWM_PIN = GPIO_NUM_18;
-static constexpr uint8_t AUX_SERVO_PWM_CHANNEL = 0;
+// Servo PWM auxiliar tradicional. GPIO17 soporta LEDC/PWM en ESP32-S3 y no se
+// usa en este firmware para CAN, USB CDC nativo ni buses de los drivers.
+static constexpr gpio_num_t AUX_SERVO_PWM_PIN = GPIO_NUM_17;
 static constexpr uint32_t AUX_SERVO_PWM_FREQ_HZ = 50;
-static constexpr uint8_t AUX_SERVO_PWM_RES_BITS = 16;
 static constexpr uint16_t AUX_SERVO_MIN_US = 500;
 static constexpr uint16_t AUX_SERVO_MAX_US = 2500;
 static constexpr uint16_t AUX_SERVO_CENTER_US = 1500;
 static constexpr float AUX_SERVO_MIN_DEG = 0.0f;
 static constexpr float AUX_SERVO_MAX_DEG = 180.0f;
+// Operacion normal: el servo se controla por ROS2/UI mediante SetGripper o
+// comandos SERVO/SERVO_US. Activar solo para pruebas electricas de banco.
+static constexpr bool AUX_SERVO_TEST_SWEEP_ENABLED = false;
+static constexpr uint32_t AUX_SERVO_TEST_SWEEP_PERIOD_MS = 1000;
 
 // Diferencia maxima permitida entre X1 e X2, en cuentas de encoder corregidas.
 // Con 2048 cuentas/mm, 4096 cuentas equivalen a 2.0 mm.

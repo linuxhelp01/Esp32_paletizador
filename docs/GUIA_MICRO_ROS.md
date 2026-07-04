@@ -403,11 +403,13 @@ HOME A
 El servo auxiliar por PWM tradicional se configura en `src/config.h`:
 
 ```cpp
-AUX_SERVO_PWM_PIN = GPIO_NUM_18
+AUX_SERVO_PWM_PIN = GPIO_NUM_17
 AUX_SERVO_MIN_US = 500
 AUX_SERVO_MAX_US = 2500
 AUX_SERVO_CENTER_US = 1500
 ```
+
+El firmware usa la libreria `ESP32Servo` y escribe el pulso con `writeMicroseconds()`.
 
 Comandos textuales disponibles:
 

@@ -11,10 +11,12 @@ export function usePalletizerSocket() {
   const [events, setEvents] = useState<BackendEvent[]>([]);
   const [lastFeedback, setLastFeedback] = useState<Record<string, unknown> | null>(null);
   const [lastResult, setLastResult] = useState<Record<string, unknown> | null>(null);
+  const [lastPing, setLastPing] = useState<Record<string, unknown> | null>(null);
 
   const pushEvent = useCallback((event: BackendEvent) => {
     setEvents((current) => [event, ...current].slice(0, 80));
     if (event.state) setState(event.state);
+    if (event.type === "ping_result" && event.ping) setLastPing(event.ping);
     if (event.type === "action_feedback") setLastFeedback({ action: event.action, ...event.feedback });
     if (event.type === "action_result") setLastResult({ action: event.action, ...event.result });
   }, []);
@@ -70,6 +72,7 @@ export function usePalletizerSocket() {
     events,
     lastFeedback,
     lastResult,
+    lastPing,
     send
-  }), [connected, events, lastFeedback, lastResult, send, state]);
+  }), [connected, events, lastFeedback, lastPing, lastResult, send, state]);
 }

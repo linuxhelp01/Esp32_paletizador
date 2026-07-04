@@ -27,13 +27,13 @@ export function machineReadiness(state: PalletizerState, uiConnected = true) {
   const faultText = String(state.fault_state || "");
   const hasFault = faultText.startsWith("FAULT") || state.status?.fault === 1;
 
-  const esp32Physical = Boolean(state.connections.esp32_physical ?? state.connections.palletizer_node);
+  const esp32Physical = Boolean(state.connections.esp32_physical);
   const rosCommunication = Boolean(state.connections.ros_communication ?? state.connections.ros_messages);
   const statusFresh = Boolean(state.connections.status);
   const jointStatesFresh = Boolean(state.connections.joint_states);
   const motorRpmFresh = Boolean(state.connections.motor_rpm);
   const axisPositionFresh = Boolean(state.connections.axis_position_mm);
-  const motorStateTopicsFresh = statusFresh && jointStatesFresh && motorRpmFresh;
+  const motorStateTopicsFresh = Boolean(state.connections.motor_state_messages) || (statusFresh && (jointStatesFresh || motorRpmFresh));
   const telemetryFresh = motorStateTopicsFresh && axisPositionFresh;
 
   const motorsOnlineKnown = online.length >= MOTOR_COUNT;
