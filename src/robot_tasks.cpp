@@ -251,14 +251,19 @@ static void processRobotCommand(const RobotCommand &command) {
 }
 
 static void controlTask(void *) {
+  TickType_t lastWake = xTaskGetTickCount();
   for (;;) {
     if (takeEmergencyStopRequest()) {
       stopAllMotors();
     }
 
     RobotCommand command;
-    while (robotCommandQueue && xQueueReceive(robotCommandQueue, &command, 0) == pdTRUE) {
+    uint8_t commandsProcessed = 0;
+    while (commandsProcessed < ROBOT_MAX_COMMANDS_PER_CONTROL_CYCLE &&
+           robotCommandQueue &&
+           xQueueReceive(robotCommandQueue, &command, 0) == pdTRUE) {
       processRobotCommand(command);
+      commandsProcessed++;
     }
 
     pollEncoders();
@@ -266,16 +271,17 @@ static void controlTask(void *) {
     serviceMachine();
 
     publishSnapshot();
-    vTaskDelay(pdMS_TO_TICKS(CONTROL_TASK_PERIOD_MS));
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(CONTROL_TASK_PERIOD_MS));
   }
 }
 
 static void rosTask(void *) {
 #if ENABLE_MICRO_ROS
+  TickType_t lastWake = xTaskGetTickCount();
   for (;;) {
     manageRosBridge();
     spinRosBridge();
-    vTaskDelay(pdMS_TO_TICKS(ROS_TASK_PERIOD_MS));
+    vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(ROS_TASK_PERIOD_MS));
   }
 #else
   vTaskDelete(nullptr);

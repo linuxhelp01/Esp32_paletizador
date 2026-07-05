@@ -31,6 +31,8 @@ export function MotorStateDrawer({ state, send }: Props) {
   const stalled = valueArray(status.stalled);
   const positionMm = numberArray(status.mm);
   const velocityMmS = numberArray(status.vel_mm_s);
+  const derivedAccel = numberArray(status.derived_accel);
+  const lastAcc = numberArray(status.lastAcc);
   const statusRpm = numberArray(status.rpm);
   const enc31 = numberArray(status.enc31);
   const raw35 = numberArray(status.raw35);
@@ -93,6 +95,8 @@ export function MotorStateDrawer({ state, send }: Props) {
                   <div><dt>Stall</dt><dd>{stalled[index] ? "SI" : "No"}</dd></div>
                   <div><dt>Posicion</dt><dd>{units[index] === "deg" ? deg(positionMm[index]) : mm(positionMm[index])}</dd></div>
                   <div><dt>Velocidad</dt><dd>{units[index] === "deg" ? `${deg(velocityMmS[index])}/s` : `${mm(velocityMmS[index])}/s`}</dd></div>
+                  <div><dt>Acel. derivada</dt><dd>{Number(derivedAccel[index] ?? 0).toFixed(1)} {units[index] === "deg" ? "deg/s2" : "mm/s2"}</dd></div>
+                  <div><dt>Acc cmd</dt><dd>{Number(lastAcc[index] ?? 0).toFixed(0)}</dd></div>
                   <div><dt>RPM</dt><dd>{rpm(rpmValue)}</dd></div>
                   <div><dt>Encoder 0x31</dt><dd>{Number(enc31[index] ?? 0).toFixed(0)}</dd></div>
                   <div><dt>Encoder 0x35</dt><dd>{Number(raw35[index] ?? 0).toFixed(0)}</dd></div>

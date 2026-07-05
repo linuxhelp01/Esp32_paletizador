@@ -30,7 +30,7 @@ export function App() {
         <aside className="right-rail">
           <JogControl state={state} send={send} />
           <MoveControl state={state} lastFeedback={lastFeedback} lastResult={lastResult} send={send} />
-          <HomingControls state={state} send={send} />
+          <HomingControls state={state} lastFeedback={lastFeedback} lastResult={lastResult} send={send} />
           <ServiceControls state={state} send={send} />
         </aside>
         <section className="bottom-rail">

@@ -34,14 +34,16 @@ static constexpr uint16_t MAX_RPM = 3000;
 static constexpr uint8_t MAX_ACC = 255;
 static constexpr uint8_t DEFAULT_ACC = 10;
 static constexpr uint16_t DEFAULT_RPM = 500;
-// Muestreo de posicion para movimientos rapidos:
-// a 1000 mm/s el eje recorre 1 mm cada 1 ms. Se solicitan 2 lecturas 0x31 por
-// ciclo de 1 ms; con 5 motores, cada motor queda actualizado cada ~2.5 ms
-// (~400 Hz por motor). La telemetria secundaria queda mas lenta para reservar
-// ancho de banda CAN para posicion.
-static constexpr uint32_t ENCODER_POLL_MS = 1;
-static constexpr uint8_t ENCODER_REQUESTS_PER_POLL = 2;
-static constexpr uint32_t POSITION_SAMPLE_MAX_AGE_MS = 4;
+// Scheduler de posicion 0x31 por criticidad del eje. X1/X2 se leen como par
+// critico para detectar desalineacion; Y/Z tienen frecuencia buena para
+// correcciones <50 ms; A baja frecuencia en reposo y sube cuando se mueve.
+static constexpr uint32_t ENCODER_X_PAIR_POLL_MS = 4;       // 250 Hz por motor.
+static constexpr uint32_t ENCODER_LINEAR_POLL_MS = 5;       // 200 Hz por motor.
+static constexpr uint32_t ENCODER_A_IDLE_POLL_MS = 20;      // 50 Hz.
+static constexpr uint32_t ENCODER_A_ACTIVE_POLL_MS = 5;     // 200 Hz.
+static constexpr uint8_t ENCODER_MAX_REQUESTS_PER_CONTROL_CYCLE = 2;
+static constexpr uint8_t CAN_POLL_SLOT_COUNT = 20;          // Ventana determinista de 20 ms.
+static constexpr uint32_t POSITION_SAMPLE_MAX_AGE_MS = 10;
 static constexpr uint32_t SPEED_POLL_MS = 100;
 static constexpr uint32_t RAW_ENCODER_DIAGNOSTIC_POLL_MS = 2000;
 static constexpr uint32_t ANGLE_ERROR_POLL_MS = 50;
@@ -63,6 +65,8 @@ static constexpr uint32_t ROS_TASK_STACK_BYTES = 16384;
 static constexpr uint32_t CONTROL_TASK_PERIOD_MS = 1;
 static constexpr uint32_t ROS_TASK_PERIOD_MS = 1;
 static constexpr uint8_t ROBOT_COMMAND_QUEUE_LENGTH = 8;
+static constexpr uint8_t ROBOT_MAX_COMMANDS_PER_CONTROL_CYCLE = 2;
+static constexpr uint8_t CAN_MAX_REPLIES_PER_CONTROL_CYCLE = 8;
 static constexpr uint32_t MICRO_ROS_RECONNECT_PERIOD_MS = 1000;
 static constexpr uint32_t MICRO_ROS_HEALTH_CHECK_PERIOD_MS = 5000;
 static constexpr int MICRO_ROS_PING_TIMEOUT_MS = 100;

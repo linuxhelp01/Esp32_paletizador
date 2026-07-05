@@ -947,6 +947,7 @@ static void fillTelemetryMessages() {
   appendFloatArray("mm", snapshot.motorPositionMm, ROBOT_MOTOR_COUNT);
   appendFloatArray("vel_mm_s", snapshot.motorVelocityMmS, ROBOT_MOTOR_COUNT);
   appendInt16Array("rpm", snapshot.motorRpm, ROBOT_MOTOR_COUNT);
+  appendUint8Array("lastAcc", snapshot.lastAcc, ROBOT_MOTOR_COUNT);
   appendInt32Array("angleError", snapshot.angleError, ROBOT_MOTOR_COUNT);
   appendStatus(
       ",\"units\":[\"mm\",\"mm\",\"mm\",\"mm\",\"deg\"],\"limits\":[[%u,%.3f,%.3f],[%u,%.3f,%.3f],[%u,%.3f,%.3f]]",

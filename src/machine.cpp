@@ -27,7 +27,7 @@ MotorNode motors[ROBOT_MOTOR_COUNT] = {
   MotorNode("A", CAN_ID_A, MOTOR_DIR_A, true),
 };
 
-static uint32_t lastEncoderPollMs = 0;
+static uint32_t lastEncoderPollMs[ROBOT_MOTOR_COUNT] = {};
 static uint32_t lastSpeedPollMs = 0;
 static uint32_t lastRawEncoderPollMs = 0;
 static uint32_t lastAngleErrorPollMs = 0;
@@ -35,7 +35,6 @@ static uint32_t lastHomeStatusPollMs = 0;
 static uint32_t lastEnableStatusPollMs = 0;
 static uint32_t lastStallStatusPollMs = 0;
 static uint32_t encoderPollingPausedUntilMs = 0;
-static uint8_t nextEncoderPollMotor = 0;
 static uint8_t nextSpeedPollMotor = 0;
 static uint8_t nextRawEncoderPollMotor = 0;
 static uint8_t nextAngleErrorPollMotor = 0;
@@ -48,6 +47,41 @@ static int8_t xPairExpectedDirection = 0;
 
 static bool commandStopAll();
 static void serviceAuxServoTestSweep();
+
+static bool motorIsTelemetryActive(const MotorNode &motor, uint32_t now);
+
+static constexpr uint8_t NO_MOTOR_SLOT = 0xFF;
+static constexpr uint8_t ENCODER_SLOT_WIDTH = 2;
+
+// Slot de 20 ms para que la telemetria critica no dependa del orden de los if.
+// X1/X2: 250 Hz por motor; Y/Z: 200 Hz; A: 50 Hz idle, ~200 Hz activo.
+static constexpr uint8_t ENCODER_POLL_SLOTS[CAN_POLL_SLOT_COUNT][ENCODER_SLOT_WIDTH] = {
+  {0, NO_MOTOR_SLOT}, {1, 4},             {2, NO_MOTOR_SLOT}, {3, NO_MOTOR_SLOT},
+  {0, NO_MOTOR_SLOT}, {1, NO_MOTOR_SLOT}, {4, NO_MOTOR_SLOT}, {2, NO_MOTOR_SLOT},
+  {0, 3},             {1, NO_MOTOR_SLOT}, {NO_MOTOR_SLOT, NO_MOTOR_SLOT}, {4, NO_MOTOR_SLOT},
+  {0, 2},             {1, 3},             {NO_MOTOR_SLOT, NO_MOTOR_SLOT}, {NO_MOTOR_SLOT, NO_MOTOR_SLOT},
+  {0, 4},             {1, 2},             {3, NO_MOTOR_SLOT},             {NO_MOTOR_SLOT, NO_MOTOR_SLOT},
+};
+
+static constexpr bool ENCODER_SLOT_A_REQUIRES_ACTIVITY[CAN_POLL_SLOT_COUNT] = {
+  false, true,  false, false, false, false, false, false, false, false,
+  false, true,  false, false, false, false, true,  false, false, false,
+};
+
+struct CanPollBudget {
+  uint8_t used = 0;
+
+  bool available() const {
+    return used < ENCODER_MAX_REQUESTS_PER_CONTROL_CYCLE;
+  }
+
+  bool request(bool (*fn)(const MotorNode &), const MotorNode &motor) {
+    if (!available()) return false;
+    if (!fn(motor)) return false;
+    used++;
+    return true;
+  }
+};
 
 struct AxisLimitState {
   bool configured = false;
@@ -153,6 +187,35 @@ static uint8_t motorIndex(const MotorNode &motor) {
     if (&motors[i] == &motor) return i;
   }
   return 0;
+}
+
+static bool axisIncludesMotor(Axis axis, uint8_t motorIndex) {
+  switch (axis) {
+    case Axis::X:
+      return motorIndex == 0 || motorIndex == 1;
+    case Axis::X1:
+      return motorIndex == 0;
+    case Axis::X2:
+      return motorIndex == 1;
+    case Axis::Y:
+      return motorIndex == 2;
+    case Axis::Z:
+      return motorIndex == 3;
+    case Axis::A:
+      return motorIndex == 4;
+    case Axis::ALL:
+      return motorIndex < 4;
+    default:
+      return false;
+  }
+}
+
+static bool motorIsTelemetryActive(const MotorNode &motor, uint32_t now) {
+  const uint8_t index = motorIndex(motor);
+  if (motor.moveStatus != 0) return true;
+  if (fabsf(motor.velocityMmS) > 0.01f) return true;
+  if (homing.active && axisIncludesMotor(currentHomingAxis(), index)) return true;
+  return motor.lastSeenMs > 0 && now - motor.lastSeenMs < 250;
 }
 
 static uint8_t homeDirectionForMotor(const MotorNode &motor) {
@@ -1083,7 +1146,9 @@ static void handleStatusReply(MotorNode &motor, const twai_message_t &msg) {
 
 void drainCanReplies() {
   twai_message_t rx = {};
-  while (mks::readAnyFrame(rx, 0)) {
+  uint8_t replies = 0;
+  while (replies < CAN_MAX_REPLIES_PER_CONTROL_CYCLE && mks::readAnyFrame(rx, 0)) {
+    replies++;
     MotorNode *motor = findMotorById(rx.identifier);
     if (!motor) continue;
     if (!mks::verifyChecksum(rx)) continue;
@@ -1128,55 +1193,75 @@ void drainCanReplies() {
   }
 }
 
+static bool encoderSlotAllowsMotor(uint8_t slot, uint8_t motorIndex, uint32_t now) {
+  if (motorIndex >= ROBOT_MOTOR_COUNT) return false;
+  if (motorIndex != 4) return true;
+  if (!ENCODER_SLOT_A_REQUIRES_ACTIVITY[slot]) return true;
+  return motorIsTelemetryActive(motors[4], now);
+}
+
+static void pollScheduledEncoders(uint32_t now, CanPollBudget &budget) {
+  const uint8_t slot = static_cast<uint8_t>(now % CAN_POLL_SLOT_COUNT);
+  for (uint8_t i = 0; i < ENCODER_SLOT_WIDTH; i++) {
+    const uint8_t motorIndex = ENCODER_POLL_SLOTS[slot][i];
+    if (motorIndex == NO_MOTOR_SLOT || !budget.available()) continue;
+    if (!encoderSlotAllowsMotor(slot, motorIndex, now)) continue;
+    if (budget.request(requestEncoder, motors[motorIndex])) {
+      lastEncoderPollMs[motorIndex] = now;
+    }
+  }
+}
+
 void pollEncoders() {
   const uint32_t now = millis();
   if (static_cast<int32_t>(now - encoderPollingPausedUntilMs) < 0) return;
 
-  if (now - lastEncoderPollMs >= ENCODER_POLL_MS) {
-    lastEncoderPollMs = now;
-    for (uint8_t i = 0; i < ENCODER_REQUESTS_PER_POLL; i++) {
-      requestEncoder(motors[nextEncoderPollMotor]);
-      nextEncoderPollMotor = (nextEncoderPollMotor + 1) % ROBOT_MOTOR_COUNT;
+  CanPollBudget budget;
+  pollScheduledEncoders(now, budget);
+
+  if (budget.available() && now - lastSpeedPollMs >= SPEED_POLL_MS) {
+    lastSpeedPollMs = now;
+    if (budget.request(requestSpeed, motors[nextSpeedPollMotor])) {
+      nextSpeedPollMotor = (nextSpeedPollMotor + 1) % ROBOT_MOTOR_COUNT;
     }
   }
 
-  if (now - lastSpeedPollMs >= SPEED_POLL_MS) {
-    lastSpeedPollMs = now;
-    requestSpeed(motors[nextSpeedPollMotor]);
-    nextSpeedPollMotor = (nextSpeedPollMotor + 1) % ROBOT_MOTOR_COUNT;
-  }
-
-  if (homing.active && now - lastHomeStatusPollMs >= HOME_STATUS_POLL_MS) {
+  if (budget.available() && homing.active && now - lastHomeStatusPollMs >= HOME_STATUS_POLL_MS) {
     lastHomeStatusPollMs = now;
     const Axis axis = currentHomingAxis();
-    forEachMotorInAxis(axis, [](MotorNode &motor) {
-      requestHomeStatus(motor);
+    forEachMotorInAxis(axis, [&budget](MotorNode &motor) {
+      if (!budget.available()) return false;
+      budget.request(requestHomeStatus, motor);
       return true;
     });
   }
 
-  if (!homing.active && now - lastRawEncoderPollMs >= RAW_ENCODER_DIAGNOSTIC_POLL_MS) {
+  if (budget.available() && !homing.active && now - lastRawEncoderPollMs >= RAW_ENCODER_DIAGNOSTIC_POLL_MS) {
     lastRawEncoderPollMs = now;
-    requestRawEncoder(motors[nextRawEncoderPollMotor]);
-    nextRawEncoderPollMotor = (nextRawEncoderPollMotor + 1) % ROBOT_MOTOR_COUNT;
+    if (budget.request(requestRawEncoder, motors[nextRawEncoderPollMotor])) {
+      nextRawEncoderPollMotor = (nextRawEncoderPollMotor + 1) % ROBOT_MOTOR_COUNT;
+    }
   }
 
-  if (now - lastAngleErrorPollMs >= ANGLE_ERROR_POLL_MS) {
+  if (budget.available() && now - lastAngleErrorPollMs >= ANGLE_ERROR_POLL_MS) {
     lastAngleErrorPollMs = now;
-    requestAngleError(motors[nextAngleErrorPollMotor]);
-    nextAngleErrorPollMotor = (nextAngleErrorPollMotor + 1) % ROBOT_MOTOR_COUNT;
+    if (budget.request(requestAngleError, motors[nextAngleErrorPollMotor])) {
+      nextAngleErrorPollMotor = (nextAngleErrorPollMotor + 1) % ROBOT_MOTOR_COUNT;
+    }
   }
 
-  if (now - lastEnableStatusPollMs >= ENABLE_STATUS_POLL_MS) {
+  if (budget.available() && now - lastEnableStatusPollMs >= ENABLE_STATUS_POLL_MS) {
     lastEnableStatusPollMs = now;
-    requestEnableStatus(motors[nextEnablePollMotor]);
-    nextEnablePollMotor = (nextEnablePollMotor + 1) % ROBOT_MOTOR_COUNT;
+    if (budget.request(requestEnableStatus, motors[nextEnablePollMotor])) {
+      nextEnablePollMotor = (nextEnablePollMotor + 1) % ROBOT_MOTOR_COUNT;
+    }
   }
 
-  if (now - lastStallStatusPollMs >= STALL_STATUS_POLL_MS) {
+  if (budget.available() && now - lastStallStatusPollMs >= STALL_STATUS_POLL_MS) {
     lastStallStatusPollMs = now;
-    requestStallStatus(motors[nextStallPollMotor]);
-    nextStallPollMotor = (nextStallPollMotor + 1) % ROBOT_MOTOR_COUNT;
+    if (budget.request(requestStallStatus, motors[nextStallPollMotor])) {
+      nextStallPollMotor = (nextStallPollMotor + 1) % ROBOT_MOTOR_COUNT;
+    }
   }
 }
 

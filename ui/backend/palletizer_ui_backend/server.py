@@ -49,6 +49,7 @@ ACTION_READY_TIMEOUT_SEC = float(os.environ.get("PALLETIZER_ACTION_READY_TIMEOUT
 SERVICE_READY_TIMEOUT_SEC = float(os.environ.get("PALLETIZER_SERVICE_READY_TIMEOUT_SEC", "0.02"))
 PING_SERVICE_READY_TIMEOUT_SEC = float(os.environ.get("PALLETIZER_PING_SERVICE_READY_TIMEOUT_SEC", "0.02"))
 UI_STATE_MIN_PERIOD_MS = int(os.environ.get("PALLETIZER_UI_STATE_MIN_PERIOD_MS", "33"))
+MOTOR_COUNT = 5
 
 
 def now_ms() -> int:
@@ -65,6 +66,27 @@ def parse_status_json(raw: str) -> Dict[str, Any]:
         return {"raw": raw}
 
 
+def numeric_list(value: Any, length: int) -> list[float]:
+    if not isinstance(value, list):
+        return []
+    values: list[float] = []
+    for item in value[:length]:
+        try:
+            values.append(float(item))
+        except (TypeError, ValueError):
+            values.append(0.0)
+    return values
+
+
+def average(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def axis_values_from_motor_values(values: list[float]) -> list[float]:
+    padded = (values + [0.0] * MOTOR_COUNT)[:MOTOR_COUNT]
+    return [average([padded[0], padded[1]]), padded[2], padded[3]]
+
+
 class PalletizerUiNode(Node):
     def __init__(self) -> None:
         super().__init__("palletizer_ui_backend")
@@ -72,6 +94,8 @@ class PalletizerUiNode(Node):
         self._lock = threading.Lock()
         self._last_seen_ms: Dict[str, int] = {}
         self._last_state_emit_ms = 0
+        self._last_velocity_sample_ms: Optional[int] = None
+        self._last_velocity_values: list[float] = []
         self._pending_actions: set[str] = set()
         self._active_actions: set[str] = set()
         self._state: Dict[str, Any] = {
@@ -318,11 +342,35 @@ class PalletizerUiNode(Node):
         self._send_state()
 
     def _on_status(self, msg: String) -> None:
+        stamp_ms = now_ms()
+        parsed = parse_status_json(msg.data)
         with self._lock:
+            self._add_derived_motion_status(parsed, stamp_ms)
             self._set_connection("status")
             self._state["status_raw"] = msg.data
-            self._state["status"] = parse_status_json(msg.data)
+            self._state["status"] = parsed
         self._send_state()
+
+    def _add_derived_motion_status(self, status: Dict[str, Any], stamp_ms: int) -> None:
+        velocity = numeric_list(status.get("vel_mm_s"), MOTOR_COUNT)
+        if len(velocity) < MOTOR_COUNT:
+            return
+
+        accel = [0.0] * MOTOR_COUNT
+        if self._last_velocity_sample_ms is not None and len(self._last_velocity_values) >= MOTOR_COUNT:
+            dt_s = max((stamp_ms - self._last_velocity_sample_ms) / 1000.0, 0.001)
+            accel = [
+                (velocity[index] - self._last_velocity_values[index]) / dt_s
+                for index in range(MOTOR_COUNT)
+            ]
+
+        self._last_velocity_sample_ms = stamp_ms
+        self._last_velocity_values = velocity
+        status["axis_velocity_mm_s"] = axis_values_from_motor_values(velocity)
+        status["derived_accel"] = accel
+        status["axis_accel_mm_s2"] = axis_values_from_motor_values(accel)
+        status["derived_accel_source"] = "/palletizer/status vel_mm_s"
+        status["derived_accel_units"] = ["mm/s2", "mm/s2", "mm/s2", "mm/s2", "deg/s2"]
 
     def _on_fault_state(self, msg: String) -> None:
         with self._lock:

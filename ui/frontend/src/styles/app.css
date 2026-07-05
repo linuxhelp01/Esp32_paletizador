@@ -232,6 +232,14 @@ th {
   font-size: 24px;
 }
 
+.metric small {
+  display: block;
+  margin-top: 4px;
+  color: #5f7084;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .table-wrap {
   overflow-x: auto;
 }

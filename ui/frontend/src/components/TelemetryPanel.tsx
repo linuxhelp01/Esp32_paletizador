@@ -4,17 +4,30 @@ import { PalletizerState } from "../lib/types";
 const axisLabels = ["X", "Y", "Z"];
 const motorLabels = ["X1", "X2", "Y", "Z", "A"];
 
+function numberArray(value: unknown): number[] {
+  return Array.isArray(value) ? value.map((item) => Number(item ?? 0)) : [];
+}
+
+function textArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((item) => String(item ?? "")) : [];
+}
+
 type Props = {
   state: PalletizerState;
 };
 
 export function TelemetryPanel({ state }: Props) {
   const status = state.status;
-  const positionMm = Array.isArray(status.mm) ? status.mm as number[] : [];
-  const velocityMmS = Array.isArray(status.vel_mm_s) ? status.vel_mm_s as number[] : [];
-  const online = Array.isArray(status.online) ? status.online as number[] : [];
-  const enabled = Array.isArray(status.enabled) ? status.enabled as number[] : [];
-  const units = Array.isArray(status.units) ? status.units as string[] : [];
+  const positionMm = numberArray(status.mm);
+  const velocityMmS = numberArray(status.vel_mm_s);
+  const axisVelocityMmS = numberArray(status.axis_velocity_mm_s);
+  const axisAccelMmS2 = numberArray(status.axis_accel_mm_s2);
+  const derivedAccel = numberArray(status.derived_accel);
+  const lastAcc = numberArray(status.lastAcc);
+  const online = numberArray(status.online);
+  const enabled = numberArray(status.enabled);
+  const units = textArray(status.units);
+  const accelUnits = textArray(status.derived_accel_units);
 
   return (
     <section className="section">
@@ -28,6 +41,8 @@ export function TelemetryPanel({ state }: Props) {
           <div className="metric" key={axis}>
             <span>{axis}</span>
             <strong>{mm(state.axis_position_mm[index])}</strong>
+            <small>Vel {mm(axisVelocityMmS[index])}/s</small>
+            <small>Acc {Number(axisAccelMmS2[index] ?? 0).toFixed(1)} mm/s2</small>
           </div>
         ))}
       </div>
@@ -39,6 +54,8 @@ export function TelemetryPanel({ state }: Props) {
               <th>Motor</th>
               <th>Posicion</th>
               <th>Velocidad</th>
+              <th>Acel. derivada</th>
+              <th>Acc cmd</th>
               <th>RPM</th>
               <th>Online</th>
               <th>Enable</th>
@@ -50,6 +67,8 @@ export function TelemetryPanel({ state }: Props) {
                 <td>{motor}</td>
                 <td>{units[index] === "deg" ? deg(positionMm[index]) : mm(positionMm[index])}</td>
                 <td>{units[index] === "deg" ? `${deg(velocityMmS[index])}/s` : `${mm(velocityMmS[index])}/s`}</td>
+                <td>{Number(derivedAccel[index] ?? 0).toFixed(1)} {accelUnits[index] || (units[index] === "deg" ? "deg/s2" : "mm/s2")}</td>
+                <td>{Number(lastAcc[index] ?? 0).toFixed(0)}</td>
                 <td>{rpm(state.motor_rpm[index])}</td>
                 <td>{online[index] ? "OK" : "N/D"}</td>
                 <td>{enabled[index] ? "ON" : "OFF"}</td>

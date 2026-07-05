@@ -7,6 +7,16 @@ type Props = {
 
 export function SystemSummary({ state }: Props) {
   const readiness = machineReadiness(state);
+  const homingState = String(state.status?.homing ?? "idle");
+  const operationMode = readiness.hasFault
+    ? "Falla"
+    : homingState !== "idle"
+      ? `Homing ${homingState}`
+      : readiness.moving
+        ? "Movimiento"
+        : readiness.ready
+          ? "Listo"
+          : "No operativo";
 
   return (
     <section className="section system-summary">
@@ -21,7 +31,7 @@ export function SystemSummary({ state }: Props) {
         <div><span>Enable valido</span><strong>{readiness.enableValidCount}/{MOTOR_COUNT}</strong></div>
         <div><span>Servos habilitados</span><strong>{readiness.enabledCount}/{MOTOR_COUNT}</strong></div>
         <div><span>Alarmas activas</span><strong>{readiness.hasFault || readiness.stalledCount ? readiness.stalledCount || 1 : 0}</strong></div>
-        <div><span>Modo de operacion</span><strong>Manual</strong></div>
+        <div><span>Modo de operacion</span><strong>{operationMode}</strong></div>
         <div><span>Comunicacion</span><strong>{readiness.rosCommunication ? "OK" : "N/D"}</strong></div>
       </div>
     </section>
