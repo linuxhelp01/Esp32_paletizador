@@ -63,6 +63,11 @@ Abrir:
 http://localhost:5173
 ```
 
+El primer launch ejecuta `npm ci` automaticamente si faltan las dependencias
+del frontend. El navegador conecta el WebSocket al mismo host con el que se
+abrio la pagina, por lo que tambien funciona desde otra maquina usando
+`http://IP_DEL_PC:5173`.
+
 
 ## Arranque con launch file
 
@@ -129,11 +134,12 @@ El firmware actual expone solo una parte del grafo ROS para mantener estabilidad
 micro-ROS:
 
 ```text
-activos: topics de telemetria, /palletizer/emergency_stop, /palletizer/command, /palletizer/move_xyz
-desactivados: services, /palletizer/home_axis, /palletizer/go_origin
+activos: topics de telemetria, /palletizer/emergency_stop, /palletizer/move_xyz
+desactivados: services, /palletizer/command, /palletizer/fast_move_xyz, /palletizer/home_axis, /palletizer/go_origin
 ```
 
-La UI muestra esos controles secundarios. Para homing/origen y servo auxiliar usa `/palletizer/command` como fallback cuando las actions o services opcionales no estan disponibles.
+La UI muestra esos controles secundarios, pero los mantiene no disponibles
+mientras sus interfaces opcionales no existan en el grafo ROS.
 
 ## Modelo 3D
 

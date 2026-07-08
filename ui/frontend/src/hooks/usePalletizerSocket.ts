@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BackendEvent, emptyState, PalletizerState } from "../lib/types";
 
-const WS_URL = import.meta.env.VITE_PALLETIZER_WS_URL ?? "ws://127.0.0.1:8765";
+const WS_PORT = import.meta.env.VITE_PALLETIZER_WS_PORT ?? "8765";
+const WS_URL =
+  import.meta.env.VITE_PALLETIZER_WS_URL ??
+  `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.hostname}:${WS_PORT}`;
 const EVENT_LOG_IGNORED_TYPES = new Set(["state", "backend_status", "hello"]);
 
 export function usePalletizerSocket() {

@@ -26,7 +26,6 @@ Publishers:
 
 Subscribers:
   /palletizer/emergency_stop
-  /palletizer/command
 
 Action servers:
   /palletizer/move_xyz [palletizer_msgs/action/MoveXYZ]
@@ -44,6 +43,9 @@ Funciones existentes en codigo o interfaces, pero desactivadas en el grafo ROS a
 /palletizer/clear_fault
 /palletizer/release_stall
 /palletizer/get_driver_status
+/palletizer/set_gripper
+/palletizer/command
+/palletizer/fast_move_xyz
 /palletizer/home_axis
 /palletizer/go_origin
 ```
@@ -735,7 +737,10 @@ Es normal en el firmware actual. Los services estan desactivados por estabilidad
 
 ### No aparece `/palletizer/command`
 
-En el firmware actual deberia aparecer. Si no aparece, probablemente estas ejecutando firmware antiguo o el agente no reconstruyo entidades despues de cargar. Reinicia el agente y verifica `ros2 node info /palletizer_controller`. La interfaz recomendada para movimiento cartesiano sigue siendo `/palletizer/move_xyz`; `/palletizer/command` queda para comandos auxiliares como `HOME A` y `SERVO`.
+Es normal en el perfil estable actual. Se desactivo junto con los servicios y
+el subscriber de movimiento rapido porque el conjunto ampliado no completaba
+de forma fiable la creacion de entidades micro-ROS. El movimiento cartesiano
+permanece disponible por `/palletizer/move_xyz`.
 
 ### Diferencia entre setpoint y `/joint_states`
 

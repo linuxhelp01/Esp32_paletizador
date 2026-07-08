@@ -32,7 +32,6 @@ Subscribers activos actualmente:
 
 ```text
 /palletizer/emergency_stop
-/palletizer/command
 ```
 
 Action activa actualmente:
@@ -41,7 +40,9 @@ Action activa actualmente:
 /palletizer/move_xyz [palletizer_msgs/action/MoveXYZ]
 ```
 
-No hay services activos en el perfil actual. El subscriber `/palletizer/command` queda activo para comandos auxiliares de bajo costo como `HOME A` y control del servo PWM.
+No hay services activos en el perfil actual. `/palletizer/command` y
+`/palletizer/fast_move_xyz` tambien estan desactivados para mantener estable la
+creacion de entidades micro-ROS.
 
 Estas funciones existen en codigo o en las interfaces, pero estan desactivadas
 en el grafo ROS actual para evitar reconexiones e inestabilidad por exceso de
@@ -472,7 +473,9 @@ baudios. `SERIAL_BAUD = 115200` no suele ser el cuello principal cuando usas
 `/dev/ttyACM0` por USB nativo. El problema visto hasta ahora fue mas bien la
 presion de entidades micro-ROS y telemetria.
 
-Por eso el perfil actual mantiene desactivados los services y actions secundarias, pero deja activo `/palletizer/command` para comandos auxiliares de baja carga como `HOME A` y `SERVO`.
+Por eso el perfil actual mantiene desactivados los services, actions
+secundarias y subscribers auxiliares. El movimiento cartesiano principal sigue
+disponible mediante `/palletizer/move_xyz`.
 
 ## 10. Problemas comunes
 

@@ -120,13 +120,17 @@ static char frameIdBuffer[] = "palletizer_base";
 static char jointNameBuffers[ROBOT_MOTOR_COUNT][4] = {"X1", "X2", "Y", "Z", "A"};
 
 static constexpr size_t ROS_EXECUTOR_TIMERS = 3;
-static constexpr bool ROS_ENABLE_COMMAND_SUBSCRIBER = true;
-static constexpr bool ROS_ENABLE_FAST_MOVE_SUBSCRIBER = true;
+// Keep the entity set small enough for reliable creation over USB CDC.
+// Absolute movements remain available through /palletizer/move_xyz.
+static constexpr bool ROS_ENABLE_COMMAND_SUBSCRIBER = false;
+static constexpr bool ROS_ENABLE_FAST_MOVE_SUBSCRIBER = false;
 static constexpr size_t ROS_EXECUTOR_SUBSCRIPTIONS = 1 +
                                                        (ROS_ENABLE_COMMAND_SUBSCRIBER ? 1 : 0) +
                                                        (ROS_ENABLE_FAST_MOVE_SUBSCRIBER ? 1 : 0);
 static constexpr bool ROS_ENABLE_SERVICE_SERVERS = false;
-static constexpr bool ROS_ENABLE_GRIPPER_SERVICE = true;
+// Keep the stable micro-ROS profile below the ESP32/XRCE entity limit.
+// The UI reports the auxiliary servo control as unavailable in this profile.
+static constexpr bool ROS_ENABLE_GRIPPER_SERVICE = false;
 static constexpr bool ROS_ENABLE_EXTENDED_SERVICE_SERVERS = false;
 static constexpr size_t ROS_EXECUTOR_SERVICES = (ROS_ENABLE_SERVICE_SERVERS
                                                    ? (ROS_ENABLE_EXTENDED_SERVICE_SERVERS ? 6 : 2)
