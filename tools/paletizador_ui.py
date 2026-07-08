@@ -14,12 +14,13 @@ except ImportError:
 
 
 BAUD = 115200
-AXES = ("X", "X1", "X2", "Y", "Z")
-MOTOR_AXES = ("X", "Y", "Z")
+AXES = ("X", "X1", "X2", "Y", "Z", "A")
+MOTOR_AXES = ("X", "Y", "Z", "A")
 ROBOT_AXES = ("X", "Y", "Z")
 STATUS_RE = re.compile(
-    r"^\s*(?P<axis>X1|X2|Y|Z)\s+id=0x(?P<id>[0-9A-Fa-f]+)\s+"
+    r"^\s*(?P<axis>X1|X2|Y|Z|A)\s+id=0x(?P<id>[0-9A-Fa-f]+)\s+"
     r"online=(?P<online>[01])\s+angularEnc=(?P<enc>-?\d+|\?)\s+"
+    r"angleDeg=(?P<deg>-?\d+(?:\.\d+)?|\?)\s+"
     r"linearMm=(?P<mm>-?\d+(?:\.\d+)?|\?)\s+"
     r"rpm=(?P<rpm>-?\d+|\?)\s+"
     r"acc=(?P<acc>\d+)\s+moveStatus=(?P<move>\d+)\s+"
@@ -73,8 +74,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Paletizador CAN")
-        self.geometry("920x560")
-        self.minsize(840, 500)
+        self.geometry("1040x620")
+        self.minsize(920, 540)
 
         self.inbox = queue.Queue()
         self.serial_worker = SerialWorker(self.inbox)
@@ -94,6 +95,10 @@ class App(tk.Tk):
         self.robot_z_var = tk.StringVar(value="0.000")
         self.xyz_linear_velocity_var = tk.StringVar(value="40.0")
         self.xyz_linear_accel_var = tk.StringVar(value="200.0")
+        self.axis_a_position_var = tk.StringVar(value="0.0")
+        self.axis_a_velocity_var = tk.StringVar(value="90.0")
+        self.axis_a_accel_var = tk.StringVar(value="180.0")
+        self.axis_a_jog_velocity_var = tk.StringVar(value="30.0")
         self.auto_status_var = tk.BooleanVar(value=True)
         self.link_status_var = tk.StringVar(value="No conexion")
         self.link_ok = False
@@ -129,9 +134,11 @@ class App(tk.Tk):
         motor_tab = ttk.Frame(motion_tabs, padding=10)
         axis_tab = ttk.Frame(motion_tabs, padding=10)
         xyz_tab = ttk.Frame(motion_tabs, padding=10)
+        axis_a_tab = ttk.Frame(motion_tabs, padding=10)
         motion_tabs.add(motor_tab, text="Prueba 1: angular motor")
         motion_tabs.add(axis_tab, text="Prueba 2: lineal eje")
         motion_tabs.add(xyz_tab, text="Prueba 3: lineal XYZ")
+        motion_tabs.add(axis_a_tab, text="Eje A rotatorio")
 
         for col in range(10):
             motor_tab.columnconfigure(col, weight=1)
@@ -179,6 +186,21 @@ class App(tk.Tk):
         ttk.Entry(xyz_tab, textvariable=self.xyz_linear_accel_var).grid(row=1, column=4, sticky="ew", padx=(0, 8))
         ttk.Button(xyz_tab, text="Enviar XYZ coordinado", command=self.send_robot_xyz).grid(row=1, column=5, sticky="ew")
 
+        for col in range(8):
+            axis_a_tab.columnconfigure(col, weight=1)
+        ttk.Label(axis_a_tab, text="Posicion A (deg)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(axis_a_tab, textvariable=self.axis_a_position_var).grid(row=1, column=0, sticky="ew", padx=(0, 8))
+        ttk.Label(axis_a_tab, text="Velocidad (deg/s)").grid(row=0, column=1, sticky="w")
+        ttk.Entry(axis_a_tab, textvariable=self.axis_a_velocity_var).grid(row=1, column=1, sticky="ew", padx=(0, 8))
+        ttk.Label(axis_a_tab, text="Aceleracion (deg/s2)").grid(row=0, column=2, sticky="w")
+        ttk.Entry(axis_a_tab, textvariable=self.axis_a_accel_var).grid(row=1, column=2, sticky="ew", padx=(0, 8))
+        ttk.Button(axis_a_tab, text="Mover A", command=self.send_axis_a_position).grid(row=1, column=3, sticky="ew", padx=(0, 8))
+        ttk.Label(axis_a_tab, text="Giro continuo (deg/s)").grid(row=0, column=4, sticky="w")
+        ttk.Entry(axis_a_tab, textvariable=self.axis_a_jog_velocity_var).grid(row=1, column=4, sticky="ew", padx=(0, 8))
+        ttk.Button(axis_a_tab, text="Girar A", command=self.send_axis_a_velocity).grid(row=1, column=5, sticky="ew", padx=(0, 8))
+        ttk.Button(axis_a_tab, text="HOME A", command=lambda: self.send("HOME A")).grid(row=1, column=6, sticky="ew", padx=(0, 8))
+        ttk.Button(axis_a_tab, text="ZERO A", command=lambda: self.send("ZERO A")).grid(row=1, column=7, sticky="ew")
+
         quick = ttk.Frame(root)
         quick.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         ttk.Button(quick, text="STATUS", command=lambda: self.send("STATUS")).pack(side="left")
@@ -190,7 +212,7 @@ class App(tk.Tk):
         ttk.Button(quick, text="FAULT TEST", command=lambda: self.send("FAULT TEST")).pack(side="left", padx=(8, 0))
         ttk.Checkbutton(quick, text="Actualizar estado", variable=self.auto_status_var).pack(side="left", padx=(16, 0))
 
-        columns = ("axis", "id", "online", "enc", "mm", "rpm", "acc", "move", "home", "last")
+        columns = ("axis", "id", "online", "enc", "deg", "mm", "rpm", "acc", "move", "home", "last")
         self.status_table = ttk.Treeview(root, columns=columns, show="headings", height=5)
         self.status_table.grid(row=3, column=0, sticky="nsew", pady=(0, 8))
 
@@ -199,6 +221,7 @@ class App(tk.Tk):
             "id": "CAN ID",
             "online": "Conectado",
             "enc": "Angular enc",
+            "deg": "Angulo deg",
             "mm": "Lineal mm",
             "rpm": "Velocidad",
             "acc": "Aceleracion",
@@ -211,6 +234,7 @@ class App(tk.Tk):
             "id": 80,
             "online": 90,
             "enc": 140,
+            "deg": 100,
             "mm": 100,
             "rpm": 100,
             "acc": 100,
@@ -222,8 +246,8 @@ class App(tk.Tk):
             self.status_table.heading(column, text=headings[column])
             self.status_table.column(column, width=widths[column], anchor="center")
 
-        for axis in ("X1", "X2", "Y", "Z"):
-            self.status_table.insert("", "end", iid=axis, values=(axis, "-", "NO", "-", "-", "-", "-", "-", "-", "-"))
+        for axis in ("X1", "X2", "Y", "Z", "A"):
+            self.status_table.insert("", "end", iid=axis, values=(axis, "-", "NO", "-", "-", "-", "-", "-", "-", "-", "-"))
 
         self.log = tk.Text(root, height=18, wrap="word")
         self.log.grid(row=4, column=0, sticky="nsew")
@@ -279,6 +303,18 @@ class App(tk.Tk):
         self.send(
             f"POSXYZ {self.robot_x_var.get()} {self.robot_y_var.get()} {self.robot_z_var.get()} "
             f"{self.xyz_linear_velocity_var.get()} {self.xyz_linear_accel_var.get()}"
+        )
+
+    def send_axis_a_position(self):
+        self.send(
+            f"POSA {self.axis_a_position_var.get()} "
+            f"{self.axis_a_velocity_var.get()} {self.axis_a_accel_var.get()}"
+        )
+
+    def send_axis_a_velocity(self):
+        self.send(
+            f"VELA {self.axis_a_jog_velocity_var.get()} "
+            f"{self.axis_a_accel_var.get()}"
         )
 
     def send_robot_home(self):
@@ -343,6 +379,7 @@ class App(tk.Tk):
             f"0x{match.group('id').upper()}",
             "SI" if match.group("online") == "1" else "NO",
             match.group("enc"),
+            match.group("deg"),
             match.group("mm"),
             match.group("rpm"),
             match.group("acc"),

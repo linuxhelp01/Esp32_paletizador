@@ -3,11 +3,12 @@
 #include "config.h"
 #include "mks_can.h"
 
-MotorNode motors[4] = {
+MotorNode motors[5] = {
   MotorNode("X1", CAN_ID_PHYSICAL_Y1, MOTOR_DIR_PHYSICAL_Y1),
   MotorNode("X2", CAN_ID_PHYSICAL_Y2, MOTOR_DIR_PHYSICAL_Y2),
   MotorNode("Y", CAN_ID_PHYSICAL_X, MOTOR_DIR_PHYSICAL_X),
   MotorNode("Z", CAN_ID_Z, MOTOR_DIR_Z),
+  MotorNode("A", CAN_ID_A, MOTOR_DIR_A, true),
 };
 
 static uint32_t lastEncoderPollMs = 0;
@@ -220,6 +221,7 @@ Axis parseAxis(String token) {
   if (token == "X2") return Axis::X2;
   if (token == "Y") return Axis::Y;
   if (token == "Z") return Axis::Z;
+  if (token == "A") return Axis::A;
   return Axis::UNKNOWN;
 }
 
@@ -246,9 +248,24 @@ float encoderCountsToMm(int64_t encoderCounts) {
   return static_cast<float>(encoderCounts) / ENCODER_COUNTS_PER_MM;
 }
 
+int32_t degreesToEncoderCounts(float degrees) {
+  const float counts = degrees * static_cast<float>(ENCODER_COUNTS_PER_REV) / 360.0f;
+  if (counts > MAX_INT24) return MAX_INT24;
+  if (counts < MIN_INT24) return MIN_INT24;
+  return static_cast<int32_t>(roundf(counts));
+}
+
+float encoderCountsToDegrees(int64_t encoderCounts) {
+  return static_cast<float>(encoderCounts) * 360.0f / static_cast<float>(ENCODER_COUNTS_PER_REV);
+}
+
 uint16_t linearSpeedMmSToRpm(float speedMmS) {
   const float rpm = abs(speedMmS) * 60.0f / LEADSCREW_MM_PER_REV;
   return clampRpm(static_cast<int32_t>(roundf(rpm)));
+}
+
+uint16_t angularSpeedDegSToRpm(float speedDegS) {
+  return clampRpm(static_cast<int32_t>(roundf(abs(speedDegS) / 6.0f)));
 }
 
 uint8_t angularAccelRpmSToMksAcc(float rpmPerS) {
@@ -467,10 +484,12 @@ void printHelp() {
   Serial.println();
   Serial.println("Comandos:");
   Serial.println("  HELLO");
-  Serial.println("  POS <X|Y|Z> <encoder_abs> [rpm] [acc]");
+  Serial.println("  POS <X|Y|Z|A> <encoder_abs> [rpm] [acc]");
   Serial.println("      Posicion angular absoluta del motor en cuentas de encoder.");
-  Serial.println("  POSANG <X|Y|Z> <encoder_abs> [rpm] [rpm_s]");
+  Serial.println("  POSANG <X|Y|Z|A> <encoder_abs> [rpm] [rpm_s]");
   Serial.println("      Posicion angular. En X mueve X1/X2 juntos.");
+  Serial.println("  POSA <deg_abs> [deg_s] [deg_s2]");
+  Serial.println("      Posicion absoluta del eje rotatorio A, sin limite de zona de trabajo.");
   Serial.println("  POSMM <X|Y|Z> <mm_abs> [rpm] [acc]");
   Serial.println("      Posicion lineal absoluta del extremo del robot en milimetros.");
   Serial.println("  POSLINE <X|Y|Z> <mm_abs> [mm_s] [mm_s2]");
@@ -479,11 +498,12 @@ void printHelp() {
   Serial.println("      Movimiento lineal coordinado XYZ con disparo broadcast 4Bh.");
   Serial.println("  SYNC <0|1>         (configura marca sincronizada MKS 4Ah por broadcast)");
   Serial.println("  TRIGGER            (disparo sincronizado MKS 4Bh por broadcast)");
-  Serial.println("  VEL <X|Y|Z> <rpm> [acc]");
-  Serial.println("  VELANG <X|Y|Z> <rpm> [rpm_s]");
+  Serial.println("  VEL <X|Y|Z|A> <rpm> [acc]");
+  Serial.println("  VELANG <X|Y|Z|A> <rpm> [rpm_s]");
+  Serial.println("  VELA <deg_s> [deg_s2]");
   Serial.println("  HOME X            (homing simultaneo X1/X2)");
-  Serial.println("  HOME <X|Y|Z>");
-  Serial.println("  ZERO <X|Y|Z>");
+  Serial.println("  HOME <X|Y|Z|A>");
+  Serial.println("  ZERO <X|Y|Z|A>");
   Serial.println("  PING              (fuerza consulta CAN a todos los motores)");
   Serial.println("  STOP");
   Serial.println("  FAULT STATUS      (muestra el estado de seguridad)");
@@ -511,8 +531,11 @@ void printStatus() {
     Serial.print(" angularEnc=");
     if (motor.encoderOk) Serial.print(motor.encoder);
     else Serial.print("?");
+    Serial.print(" angleDeg=");
+    if (motor.encoderOk) Serial.print(encoderCountsToDegrees(motor.encoder), 3);
+    else Serial.print("?");
     Serial.print(" linearMm=");
-    if (motor.encoderOk) Serial.print(encoderCountsToMm(motor.encoder), 3);
+    if (motor.encoderOk && !motor.rotaryAxis) Serial.print(encoderCountsToMm(motor.encoder), 3);
     else Serial.print("?");
     Serial.print(" rpm=");
     if (motor.rpmOk) Serial.print(motor.rpm);
@@ -646,6 +669,24 @@ void handleMachineCommand(String line) {
     return;
   }
 
+  if (command == "VELA") {
+    const float speedDegS = nextToken(line).toFloat();
+    const float accelDegS2 = line.length() ? nextToken(line).toFloat() : 6000.0f;
+    if (!axisIsSafeForMotion(Axis::A)) {
+      reportCommandResult("VELA", false);
+      return;
+    }
+
+    int32_t rpm = angularSpeedDegSToRpm(speedDegS);
+    if (speedDegS < 0.0f) rpm = -rpm;
+    const uint8_t acc = angularAccelRpmSToMksAcc(accelDegS2 / 6.0f);
+    bool ok = commandPrepareSynchronizedMove();
+    ok &= commandSpeed(motors[4], rpm, acc);
+    if (ok) ok &= commandSyncTrigger();
+    reportCommandResult("VELA", ok);
+    return;
+  }
+
   if (command == "POS") {
     Axis axis = parseAxis(nextToken(line));
     int32_t target = nextToken(line).toInt();
@@ -685,6 +726,23 @@ void handleMachineCommand(String line) {
     if (ok) ok &= commandSyncTrigger();
     if (!ok) clearXPairExpectedDirectionIfAxis(axis);
     reportCommandResult("POSANG", ok);
+    return;
+  }
+
+  if (command == "POSA") {
+    const int32_t target = degreesToEncoderCounts(nextToken(line).toFloat());
+    const uint16_t rpm = line.length() ? angularSpeedDegSToRpm(nextToken(line).toFloat()) : DEFAULT_RPM;
+    const float accelDegS2 = line.length() ? nextToken(line).toFloat() : 6000.0f;
+    const uint8_t acc = angularAccelRpmSToMksAcc(accelDegS2 / 6.0f);
+    if (!axisIsSafeForMotion(Axis::A)) {
+      reportCommandResult("POSA", false);
+      return;
+    }
+
+    bool ok = commandPrepareSynchronizedMove();
+    ok &= commandAbsolutePosition(motors[4], target, rpm, acc);
+    if (ok) ok &= commandSyncTrigger();
+    reportCommandResult("POSA", ok);
     return;
   }
 

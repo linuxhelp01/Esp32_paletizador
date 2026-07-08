@@ -15,6 +15,7 @@ static constexpr uint16_t CAN_ID_PHYSICAL_X = 0x01;
 static constexpr uint16_t CAN_ID_PHYSICAL_Y1 = 0x02;
 static constexpr uint16_t CAN_ID_PHYSICAL_Y2 = 0x03;
 static constexpr uint16_t CAN_ID_Z = 0x04;
+static constexpr uint16_t CAN_ID_A = 0x05;
 
 static constexpr uint16_t MAX_RPM = 3000;
 static constexpr uint8_t MAX_ACC = 255;
@@ -44,6 +45,7 @@ static constexpr int8_t MOTOR_DIR_PHYSICAL_X = -1;
 static constexpr int8_t MOTOR_DIR_PHYSICAL_Y1 = -1;
 static constexpr int8_t MOTOR_DIR_PHYSICAL_Y2 = -1;
 static constexpr int8_t MOTOR_DIR_Z = 1;
+static constexpr int8_t MOTOR_DIR_A = 1;
 
 // Diferencia maxima permitida entre X1 e X2, en cuentas de encoder corregidas.
 // Con 2048 cuentas/mm, 4096 cuentas equivalen a 2.0 mm.

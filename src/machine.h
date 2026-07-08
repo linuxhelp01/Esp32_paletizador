@@ -8,6 +8,7 @@ enum class Axis : uint8_t {
   X2,
   Y,
   Z,
+  A,
   UNKNOWN
 };
 
@@ -15,6 +16,7 @@ struct MotorNode {
   const char *name;
   uint16_t canId;
   int8_t direction;
+  bool rotaryAxis;
   int64_t rawEncoder = 0;
   int64_t encoder = 0;
   int64_t previousEncoder = 0;
@@ -27,11 +29,11 @@ struct MotorNode {
   bool rpmOk = false;
   uint32_t lastSeenMs = 0;
 
-  MotorNode(const char *nodeName, uint16_t nodeCanId, int8_t nodeDirection)
-      : name(nodeName), canId(nodeCanId), direction(nodeDirection) {}
+  MotorNode(const char *nodeName, uint16_t nodeCanId, int8_t nodeDirection, bool nodeRotaryAxis = false)
+      : name(nodeName), canId(nodeCanId), direction(nodeDirection), rotaryAxis(nodeRotaryAxis) {}
 };
 
-extern MotorNode motors[4];
+extern MotorNode motors[5];
 
 bool beginMachine();
 void pollEncoders();
@@ -46,7 +48,10 @@ uint16_t clampRpm(int32_t rpm);
 uint8_t clampAcc(int32_t acc);
 int32_t mmToEncoderCounts(float mm);
 float encoderCountsToMm(int64_t encoderCounts);
+int32_t degreesToEncoderCounts(float degrees);
+float encoderCountsToDegrees(int64_t encoderCounts);
 uint16_t linearSpeedMmSToRpm(float speedMmS);
+uint16_t angularSpeedDegSToRpm(float speedDegS);
 uint8_t angularAccelRpmSToMksAcc(float rpmPerS);
 uint8_t linearAccelMmS2ToMksAcc(float mmPerS2);
 
@@ -63,6 +68,9 @@ bool forEachMotorInAxis(Axis axis, Callback callback) {
       break;
     case Axis::Z:
       ok &= callback(motors[3]);
+      break;
+    case Axis::A:
+      ok &= callback(motors[4]);
       break;
     default:
       return false;
