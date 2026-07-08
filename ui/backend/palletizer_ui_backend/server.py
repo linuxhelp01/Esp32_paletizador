@@ -9,7 +9,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 import rclpy
-from rclpy.action import ActionClient
+from rclpy.action import ActionClient, get_action_server_names_and_types_by_node
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 
@@ -44,12 +44,22 @@ except ImportError:
 
 
 AXIS_NAMES = ["X", "Y", "Z", "ALL", "A", "X1", "X2"]
-PALLETIZER_CONNECTION_STALE_MS = int(os.environ.get("PALLETIZER_CONNECTION_STALE_MS", "5000"))
+PALLETIZER_CONNECTION_STALE_MS = int(os.environ.get("PALLETIZER_CONNECTION_STALE_MS", "1500"))
+PALLETIZER_AVAILABILITY_HOLD_MS = int(os.environ.get("PALLETIZER_AVAILABILITY_HOLD_MS", "1200"))
 ACTION_READY_TIMEOUT_SEC = float(os.environ.get("PALLETIZER_ACTION_READY_TIMEOUT_SEC", "0.02"))
 SERVICE_READY_TIMEOUT_SEC = float(os.environ.get("PALLETIZER_SERVICE_READY_TIMEOUT_SEC", "0.02"))
 PING_SERVICE_READY_TIMEOUT_SEC = float(os.environ.get("PALLETIZER_PING_SERVICE_READY_TIMEOUT_SEC", "0.02"))
 UI_STATE_MIN_PERIOD_MS = int(os.environ.get("PALLETIZER_UI_STATE_MIN_PERIOD_MS", "33"))
 MOTOR_COUNT = 5
+
+
+def env_bool(name: str, default: str = "false") -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+PALLETIZER_ENABLE_HOME_ORIGIN_ACTIONS = env_bool("PALLETIZER_ENABLE_HOME_ORIGIN_ACTIONS")
+PALLETIZER_ENABLE_AXIS_SERVICES = env_bool("PALLETIZER_ENABLE_AXIS_SERVICES")
+PALLETIZER_ENABLE_EXTENDED_SERVICES = env_bool("PALLETIZER_ENABLE_EXTENDED_SERVICES")
 
 
 def now_ms() -> int:
@@ -93,6 +103,7 @@ class PalletizerUiNode(Node):
         self._emit: Optional[Callable[[Dict[str, Any]], None]] = None
         self._lock = threading.Lock()
         self._last_seen_ms: Dict[str, int] = {}
+        self._availability_seen_ms: Dict[str, int] = {}
         self._last_state_emit_ms = 0
         self._last_velocity_sample_ms: Optional[int] = None
         self._last_velocity_values: list[float] = []
@@ -137,19 +148,38 @@ class PalletizerUiNode(Node):
         self.create_subscription(String, "/palletizer/fault_state", self._on_fault_state, 10)
         self._emergency_pub = self.create_publisher(Bool, "/palletizer/emergency_stop", 10)
         self._command_pub = self.create_publisher(String, "/palletizer/command", 10)
+        self._jog_delta_pub = self.create_publisher(Float32MultiArray, "/palletizer/jog_xyz_delta", 10)
         self._fast_move_pub = self.create_publisher(Float32MultiArray, "/palletizer/fast_move_xyz", 10)
 
-        self._move_client = ActionClient(self, MoveXYZ, "/palletizer/move_xyz")
-        self._home_client = ActionClient(self, HomeAxis, "/palletizer/home_axis") if HomeAxis else None
-        self._origin_client = ActionClient(self, GoOrigin, "/palletizer/go_origin") if GoOrigin else None
+        self._move_client = None
+        self._home_client = None
+        self._origin_client = None
 
-        self._enable_axis_client = self.create_client(EnableAxis, "/palletizer/enable_axis") if EnableAxis else None
-        self._set_zero_client = self.create_client(SetZero, "/palletizer/set_zero") if SetZero else None
-        self._set_axis_limits_client = self.create_client(SetAxisLimits, "/palletizer/set_axis_limits") if SetAxisLimits else None
+        self._enable_axis_client = (
+            self.create_client(EnableAxis, "/palletizer/enable_axis")
+            if EnableAxis and PALLETIZER_ENABLE_AXIS_SERVICES else None
+        )
+        self._set_axis_limits_client = (
+            self.create_client(SetAxisLimits, "/palletizer/set_axis_limits")
+            if SetAxisLimits and PALLETIZER_ENABLE_AXIS_SERVICES else None
+        )
         self._set_gripper_client = self.create_client(SetGripper, "/palletizer/set_gripper") if SetGripper else None
-        self._clear_fault_client = self.create_client(ClearFault, "/palletizer/clear_fault") if ClearFault else None
-        self._release_stall_client = self.create_client(ReleaseStall, "/palletizer/release_stall") if ReleaseStall else None
-        self._get_driver_status_client = self.create_client(GetDriverStatus, "/palletizer/get_driver_status") if GetDriverStatus else None
+        self._set_zero_client = (
+            self.create_client(SetZero, "/palletizer/set_zero")
+            if SetZero and PALLETIZER_ENABLE_EXTENDED_SERVICES else None
+        )
+        self._clear_fault_client = (
+            self.create_client(ClearFault, "/palletizer/clear_fault")
+            if ClearFault and PALLETIZER_ENABLE_EXTENDED_SERVICES else None
+        )
+        self._release_stall_client = (
+            self.create_client(ReleaseStall, "/palletizer/release_stall")
+            if ReleaseStall and PALLETIZER_ENABLE_EXTENDED_SERVICES else None
+        )
+        self._get_driver_status_client = (
+            self.create_client(GetDriverStatus, "/palletizer/get_driver_status")
+            if GetDriverStatus and PALLETIZER_ENABLE_EXTENDED_SERVICES else None
+        )
 
         self.create_timer(1.0, self._publish_backend_status)
 
@@ -212,6 +242,8 @@ class PalletizerUiNode(Node):
             self._send_move_goal(message.get("goal", {}))
         elif command_type == "jog_xyz":
             self._send_jog_command(message.get("goal", {}))
+        elif command_type == "jog_xyz_delta":
+            self._send_jog_delta_command(message.get("goal", {}))
         elif command_type == "home_axis":
             self._send_home_goal(message.get("goal", {}))
         elif command_type == "go_origin":
@@ -396,11 +428,48 @@ class PalletizerUiNode(Node):
     def _command_topic_ready(self) -> bool:
         return self._command_topic_subscribers() > 0
 
+    def _palletizer_action_servers(self) -> set[str]:
+        try:
+            return {
+                name
+                for name, _types in get_action_server_names_and_types_by_node(
+                    self,
+                    "palletizer_controller",
+                    "/",
+                )
+            }
+        except Exception:
+            return set()
+
+    def _action_server_available(self, action_name: str) -> bool:
+        return action_name in self._palletizer_action_servers()
+
+    def _ensure_move_client(self) -> Any:
+        if self._move_client is None:
+            self._move_client = ActionClient(self, MoveXYZ, "/palletizer/move_xyz")
+        return self._move_client
+
+    def _ensure_home_client(self) -> Any:
+        if self._home_client is None and HomeAxis and PALLETIZER_ENABLE_HOME_ORIGIN_ACTIONS:
+            self._home_client = ActionClient(self, HomeAxis, "/palletizer/home_axis")
+        return self._home_client
+
+    def _ensure_origin_client(self) -> Any:
+        if self._origin_client is None and GoOrigin and PALLETIZER_ENABLE_HOME_ORIGIN_ACTIONS:
+            self._origin_client = ActionClient(self, GoOrigin, "/palletizer/go_origin")
+        return self._origin_client
+
     def _fast_move_subscribers(self) -> int:
         return self.count_subscribers("/palletizer/fast_move_xyz")
 
     def _fast_move_ready(self) -> bool:
         return self._fast_move_subscribers() > 0
+
+    def _jog_delta_subscribers(self) -> int:
+        return self.count_subscribers("/palletizer/jog_xyz_delta")
+
+    def _jog_delta_ready(self) -> bool:
+        return self._jog_delta_subscribers() > 0
 
     def _action_busy(self) -> bool:
         with self._lock:
@@ -492,6 +561,47 @@ class PalletizerUiNode(Node):
         self._send({"type": "command_unavailable", "command": "jog_xyz", "fallback": "move_xyz"})
         self._send_move_goal(payload)
 
+    def _send_jog_delta_command(self, payload: Dict[str, Any]) -> None:
+        if self._action_busy():
+            self._send({
+                "type": "command_rejected",
+                "command": "jog_xyz_delta",
+                "message": "action active; wait for result or stop before manual jog",
+            })
+            return
+        if self._jog_delta_ready():
+            msg = Float32MultiArray()
+            msg.data = [
+                float(payload.get("dx_mm", 0.0)),
+                float(payload.get("dy_mm", 0.0)),
+                float(payload.get("dz_mm", 0.0)),
+                float(payload.get("speed_mm_s", 25.0)),
+                float(payload.get("accel_mm_s2", 50.0)),
+            ]
+            self._jog_delta_pub.publish(msg)
+            self._send({
+                "type": "command_ack",
+                "command": "jog_xyz_delta",
+                "transport": "jog_xyz_delta",
+                "data": msg.data,
+                "subscribers": self._jog_delta_subscribers(),
+            })
+            return
+
+        with self._lock:
+            current = list(self._state.get("axis_position_mm", [0.0, 0.0, 0.0]))
+        fallback_payload = {
+            "x_mm": float(current[0] if len(current) > 0 else 0.0) + float(payload.get("dx_mm", 0.0)),
+            "y_mm": float(current[1] if len(current) > 1 else 0.0) + float(payload.get("dy_mm", 0.0)),
+            "z_mm": float(current[2] if len(current) > 2 else 0.0) + float(payload.get("dz_mm", 0.0)),
+            "speed_mm_s": float(payload.get("speed_mm_s", 25.0)),
+            "accel_mm_s2": float(payload.get("accel_mm_s2", 50.0)),
+            "tolerance_mm": 1.0,
+            "timeout_ms": 30000,
+        }
+        self._send({"type": "command_unavailable", "command": "jog_xyz_delta", "fallback": "jog_xyz"})
+        self._send_jog_command(fallback_payload)
+
     def _call_set_gripper(self, payload: Dict[str, Any]) -> None:
         closed = bool(payload.get("closed", True))
         if SetGripper is None or not self._set_gripper_client:
@@ -521,7 +631,11 @@ class PalletizerUiNode(Node):
         self._publish_command_text(f"SERVO {float(payload.get('angle_deg', 90.0)):.1f}")
 
     def _send_move_goal(self, payload: Dict[str, Any]) -> None:
-        if not self._action_ready(self._move_client):
+        if not self._action_server_available("/palletizer/move_xyz"):
+            self._send({"type": "action_unavailable", "action": "move_xyz"})
+            return
+        move_client = self._ensure_move_client()
+        if not self._action_ready(move_client):
             self._send({"type": "action_unavailable", "action": "move_xyz"})
             return
 
@@ -540,12 +654,19 @@ class PalletizerUiNode(Node):
         goal.timeout_ms = int(payload.get("timeout_ms", 30000))
         self._send({"type": "action_goal_sent", "action": "move_xyz", "goal": payload})
         self._mark_action_pending("move_xyz")
-        future = self._move_client.send_goal_async(goal, feedback_callback=self._on_move_feedback)
+        future = move_client.send_goal_async(goal, feedback_callback=self._on_move_feedback)
         future.add_done_callback(lambda f: self._on_action_goal_response("move_xyz", f))
 
     def _send_home_goal(self, payload: Dict[str, Any]) -> None:
         axis = int(payload.get("axis", 0))
-        if HomeAxis is None or not self._action_ready(self._home_client):
+        if HomeAxis is None or not PALLETIZER_ENABLE_HOME_ORIGIN_ACTIONS or not self._action_server_available("/palletizer/home_axis"):
+            axis_name = self._axis_name(axis)
+            self._send({"type": "action_unavailable", "action": "home_axis", "fallback": "raw_command"})
+            if axis_name != "UNKNOWN":
+                self._publish_command_text(f"HOME {axis_name}")
+            return
+        home_client = self._ensure_home_client()
+        if not self._action_ready(home_client):
             axis_name = self._axis_name(axis)
             self._send({"type": "action_unavailable", "action": "home_axis", "fallback": "raw_command"})
             if axis_name != "UNKNOWN":
@@ -562,12 +683,19 @@ class PalletizerUiNode(Node):
         goal.timeout_ms = int(payload.get("timeout_ms", 120000))
         self._send({"type": "action_goal_sent", "action": "home_axis", "goal": payload})
         self._mark_action_pending("home_axis")
-        future = self._home_client.send_goal_async(goal, feedback_callback=self._on_home_feedback)
+        future = home_client.send_goal_async(goal, feedback_callback=self._on_home_feedback)
         future.add_done_callback(lambda f: self._on_action_goal_response("home_axis", f))
 
     def _send_origin_goal(self, payload: Dict[str, Any]) -> None:
         axis = int(payload.get("axis", 0))
-        if GoOrigin is None or not self._action_ready(self._origin_client):
+        if GoOrigin is None or not PALLETIZER_ENABLE_HOME_ORIGIN_ACTIONS or not self._action_server_available("/palletizer/go_origin"):
+            axis_name = self._axis_name(axis)
+            self._send({"type": "action_unavailable", "action": "go_origin", "fallback": "raw_command"})
+            if axis_name != "UNKNOWN":
+                self._publish_command_text(f"ORIGIN {axis_name}")
+            return
+        origin_client = self._ensure_origin_client()
+        if not self._action_ready(origin_client):
             axis_name = self._axis_name(axis)
             self._send({"type": "action_unavailable", "action": "go_origin", "fallback": "raw_command"})
             if axis_name != "UNKNOWN":
@@ -580,7 +708,7 @@ class PalletizerUiNode(Node):
         goal.timeout_ms = int(payload.get("timeout_ms", 30000))
         self._send({"type": "action_goal_sent", "action": "go_origin", "goal": payload})
         self._mark_action_pending("go_origin")
-        future = self._origin_client.send_goal_async(goal, feedback_callback=self._on_origin_feedback)
+        future = origin_client.send_goal_async(goal, feedback_callback=self._on_origin_feedback)
         future.add_done_callback(lambda f: self._on_action_goal_response("go_origin", f))
 
     def _on_action_goal_response(self, action: str, future: Any) -> None:
@@ -774,10 +902,14 @@ class PalletizerUiNode(Node):
         return payload
 
     def _availability_snapshot(self) -> Dict[str, bool]:
-        return {
-            "move_xyz": self._move_client.server_is_ready(),
-            "home_axis": self._home_client.server_is_ready() if self._home_client else False,
-            "go_origin": self._origin_client.server_is_ready() if self._origin_client else False,
+        now = now_ms()
+        connections, _ = self._connection_snapshot()
+        ros_ready = bool(connections.get("ros_communication"))
+        action_servers = self._palletizer_action_servers()
+        raw = {
+            "move_xyz": "/palletizer/move_xyz" in action_servers,
+            "home_axis": PALLETIZER_ENABLE_HOME_ORIGIN_ACTIONS and "/palletizer/home_axis" in action_servers,
+            "go_origin": PALLETIZER_ENABLE_HOME_ORIGIN_ACTIONS and "/palletizer/go_origin" in action_servers,
             "enable_axis": self._enable_axis_client.service_is_ready() if self._enable_axis_client else False,
             "set_zero": self._set_zero_client.service_is_ready() if self._set_zero_client else False,
             "set_axis_limits": self._set_axis_limits_client.service_is_ready() if self._set_axis_limits_client else False,
@@ -786,10 +918,24 @@ class PalletizerUiNode(Node):
             "release_stall": self._release_stall_client.service_is_ready() if self._release_stall_client else False,
             "get_driver_status": self._get_driver_status_client.service_is_ready() if self._get_driver_status_client else False,
             "command_topic": self._command_topic_ready(),
+            "jog_delta_topic": self._jog_delta_ready(),
             "fast_move_topic": self._fast_move_ready(),
-            "fast_jog": (self._fast_move_ready() or self._command_topic_ready()) and not self._action_busy(),
+            "fast_jog": (self._jog_delta_ready() or self._fast_move_ready() or self._command_topic_ready()) and not self._action_busy(),
             "aux_servo": (self._set_gripper_client.service_is_ready() if self._set_gripper_client else False) or self._command_topic_ready(),
         }
+        stable = {key: self._stable_availability(key, value, now, ros_ready) for key, value in raw.items()}
+        stable["fast_jog"] = (stable.get("jog_delta_topic") or stable.get("fast_move_topic") or stable.get("command_topic")) and not self._action_busy()
+        stable["aux_servo"] = stable.get("set_gripper") or stable.get("command_topic")
+        return stable
+
+    def _stable_availability(self, key: str, current: bool, now: int, ros_ready: bool) -> bool:
+        if current and ros_ready:
+            self._availability_seen_ms[key] = now
+            return True
+        if not ros_ready:
+            return False
+        last_seen = self._availability_seen_ms.get(key)
+        return last_seen is not None and now - last_seen <= PALLETIZER_AVAILABILITY_HOLD_MS
 
     def _send_state(self, force: bool = False) -> None:
         now = now_ms()

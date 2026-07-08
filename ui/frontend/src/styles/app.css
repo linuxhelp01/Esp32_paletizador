@@ -1335,8 +1335,39 @@ th,
 .bottom-rail {
   grid-area: bottom;
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(340px, 0.65fr);
+  grid-template-columns: minmax(280px, 0.9fr) minmax(420px, 1.35fr) minmax(300px, 0.75fr);
   gap: 7px;
+}
+
+.node-interfaces table {
+  min-width: 820px;
+}
+
+.raw-command-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.raw-command-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.raw-command-form span {
+  color: #9dafc2;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.raw-command-form input {
+  min-height: 38px;
+}
+
+.raw-command-form button {
+  align-self: end;
+  min-height: 38px;
 }
 
 .section {

@@ -10,6 +10,7 @@ export type Availability = {
   release_stall?: boolean;
   get_driver_status?: boolean;
   command_topic?: boolean;
+  jog_delta_topic?: boolean;
   fast_move_topic?: boolean;
   fast_jog?: boolean;
   aux_servo?: boolean;

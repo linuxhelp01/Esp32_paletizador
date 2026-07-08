@@ -46,17 +46,32 @@ export function JogControl({ state, send }: Props) {
   const [speedMmS, setSpeedMmS] = useState(25);
   const [accelMmS2, setAccelMmS2] = useState(50);
   const fastJogAvailable = Boolean(state.availability.fast_jog);
+  const relativeJogAvailable = Boolean(state.availability.jog_delta_topic);
   const available = Boolean(fastJogAvailable || state.availability.move_xyz);
   const gripperAvailable = Boolean(state.availability.set_gripper || state.availability.aux_servo || state.availability.command_topic);
   const limits = axisLimitsFromState(state);
 
   const jog = (dxMm: number, dyMm: number, dzMm: number) => {
+    if (fastJogAvailable) {
+      send({
+        type: "jog_xyz_delta",
+        goal: {
+          dx_mm: dxMm,
+          dy_mm: dyMm,
+          dz_mm: dzMm,
+          speed_mm_s: speedMmS,
+          accel_mm_s2: accelMmS2
+        }
+      });
+      return;
+    }
+
     const nextX = clamp(currentAxis(state, 0) + dxMm, limits[0].min, limits[0].max);
     const nextY = clamp(currentAxis(state, 1) + dyMm, limits[1].min, limits[1].max);
     const nextZ = clamp(currentAxis(state, 2) + dzMm, limits[2].min, limits[2].max);
 
     send({
-      type: fastJogAvailable ? "jog_xyz" : "move_xyz",
+      type: "move_xyz",
       goal: {
         x_mm: nextX,
         y_mm: nextY,
@@ -82,7 +97,7 @@ export function JogControl({ state, send }: Props) {
     <section className="section jog-control">
       <div className="section-heading">
         <h2>Controles manuales</h2>
-        <span>{fastJogAvailable ? "jog rapido" : available ? "jog por action" : "sin jog"}</span>
+        <span>{relativeJogAvailable ? "jog relativo ESP32" : fastJogAvailable ? "jog rapido" : available ? "jog por action" : "sin jog"}</span>
       </div>
 
       <div className="jog-layout">

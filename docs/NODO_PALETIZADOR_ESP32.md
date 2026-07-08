@@ -17,7 +17,7 @@ Con los flags actuales del firmware, el nodo expone:
 | Tipo | Cantidad | Interfaces |
 |---|---:|---|
 | Publishers | 5 | `/joint_states`, `/palletizer/axis_position_mm`, `/palletizer/motor_rpm`, `/palletizer/status`, `/palletizer/fault_state` |
-| Subscribers | 3 | `/palletizer/emergency_stop`, `/palletizer/command`, `/palletizer/fast_move_xyz` |
+| Subscribers | 4 | `/palletizer/emergency_stop`, `/palletizer/jog_xyz_delta`, `/palletizer/command`, `/palletizer/fast_move_xyz` |
 | Services | 1 | `/palletizer/set_gripper` |
 | Actions | 1 | `/palletizer/move_xyz` |
 
@@ -171,6 +171,27 @@ Ejemplo:
 
 ```bash
 ros2 topic pub --once /palletizer/fast_move_xyz std_msgs/msg/Float32MultiArray "{data: [50.0, 50.0, 20.0, 25.0, 50.0]}"
+```
+
+### `/palletizer/jog_xyz_delta`
+
+- Tipo: `std_msgs/msg/Float32MultiArray`
+- QoS: best effort.
+- Datos esperados:
+
+```text
+[dx_mm, dy_mm, dz_mm, speed_mm_s, accel_mm_s2]
+```
+
+- `speed_mm_s` y `accel_mm_s2` son opcionales. Si no vienen, el firmware usa defaults.
+- Objetivo: jog relativo de baja latencia desde la UI/backend.
+- Diferencia clave respecto a `/palletizer/fast_move_xyz`: el ESP32-S3 calcula el objetivo absoluto usando su snapshot local de posicion, evitando que la interfaz mande setpoints basados en telemetria atrasada.
+- No controla eje A.
+
+Ejemplo:
+
+```bash
+ros2 topic pub --once /palletizer/jog_xyz_delta std_msgs/msg/Float32MultiArray "{data: [5.0, 0.0, 0.0, 25.0, 50.0]}"
 ```
 
 ### `/palletizer/command`
@@ -353,8 +374,9 @@ Publishers:
 
 Subscribers:
   /palletizer/emergency_stop: std_msgs/msg/Bool
-  /palletizer/command: std_msgs/msg/String
   /palletizer/fast_move_xyz: std_msgs/msg/Float32MultiArray
+  /palletizer/jog_xyz_delta: std_msgs/msg/Float32MultiArray
+  /palletizer/command: std_msgs/msg/String
 
 Service Servers:
   /palletizer/set_gripper: palletizer_msgs/srv/SetGripper

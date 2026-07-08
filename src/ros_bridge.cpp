@@ -52,6 +52,7 @@ static rcl_publisher_t statusPublisher;
 static rcl_publisher_t faultPublisher;
 static rcl_subscription_t emergencyStopSubscriber;
 static rcl_subscription_t commandSubscriber;
+static rcl_subscription_t jogDeltaSubscriber;
 static rcl_subscription_t fastMoveSubscriber;
 static rcl_service_t enableAxisService;
 static rcl_service_t setZeroService;
@@ -71,6 +72,7 @@ static std_msgs__msg__String statusMsg;
 static std_msgs__msg__String faultMsg;
 static std_msgs__msg__Bool emergencyStopMsg;
 static std_msgs__msg__String commandMsg;
+static std_msgs__msg__Float32MultiArray jogDeltaMsg;
 static std_msgs__msg__Float32MultiArray fastMoveMsg;
 static palletizer_msgs__srv__EnableAxis_Request enableAxisRequest;
 static palletizer_msgs__srv__EnableAxis_Response enableAxisResponse;
@@ -102,6 +104,7 @@ static double jointVelocities[ROBOT_MOTOR_COUNT];
 static double jointEfforts[ROBOT_MOTOR_COUNT];
 static float axisPositionsMm[ROBOT_LINEAR_AXIS_COUNT];
 static float motorRpms[ROBOT_MOTOR_COUNT];
+static float jogDeltaData[5];
 static float fastMoveData[5];
 static char statusBuffer[2300];
 static char faultBuffer[96];
@@ -121,9 +124,11 @@ static char jointNameBuffers[ROBOT_MOTOR_COUNT][4] = {"X1", "X2", "Y", "Z", "A"}
 
 static constexpr size_t ROS_EXECUTOR_TIMERS = 3;
 static constexpr bool ROS_ENABLE_COMMAND_SUBSCRIBER = true;
+static constexpr bool ROS_ENABLE_JOG_DELTA_SUBSCRIBER = true;
 static constexpr bool ROS_ENABLE_FAST_MOVE_SUBSCRIBER = true;
 static constexpr size_t ROS_EXECUTOR_SUBSCRIPTIONS = 1 +
                                                        (ROS_ENABLE_COMMAND_SUBSCRIBER ? 1 : 0) +
+                                                       (ROS_ENABLE_JOG_DELTA_SUBSCRIBER ? 1 : 0) +
                                                        (ROS_ENABLE_FAST_MOVE_SUBSCRIBER ? 1 : 0);
 static constexpr bool ROS_ENABLE_SERVICE_SERVERS = false;
 static constexpr bool ROS_ENABLE_GRIPPER_SERVICE = true;
@@ -157,6 +162,7 @@ static bool statusPublisherInitialized = false;
 static bool faultPublisherInitialized = false;
 static bool emergencyStopSubscriberInitialized = false;
 static bool commandSubscriberInitialized = false;
+static bool jogDeltaSubscriberInitialized = false;
 static bool fastMoveSubscriberInitialized = false;
 static bool enableAxisServiceInitialized = false;
 static bool setZeroServiceInitialized = false;
@@ -239,6 +245,7 @@ static void zeroRosHandles() {
   faultPublisher = rcl_get_zero_initialized_publisher();
   emergencyStopSubscriber = rcl_get_zero_initialized_subscription();
   commandSubscriber = rcl_get_zero_initialized_subscription();
+  jogDeltaSubscriber = rcl_get_zero_initialized_subscription();
   fastMoveSubscriber = rcl_get_zero_initialized_subscription();
   enableAxisService = rcl_get_zero_initialized_service();
   setZeroService = rcl_get_zero_initialized_service();
@@ -285,6 +292,7 @@ static void resetRosInitFlags() {
   faultPublisherInitialized = false;
   emergencyStopSubscriberInitialized = false;
   commandSubscriberInitialized = false;
+  jogDeltaSubscriberInitialized = false;
   fastMoveSubscriberInitialized = false;
   enableAxisServiceInitialized = false;
   setZeroServiceInitialized = false;
@@ -314,6 +322,7 @@ static void disconnectRosBridge() {
   if (setZeroServiceInitialized) ignoreRclRet(rcl_service_fini(&setZeroService, &node));
   if (enableAxisServiceInitialized) ignoreRclRet(rcl_service_fini(&enableAxisService, &node));
   if (fastMoveSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&fastMoveSubscriber, &node));
+  if (jogDeltaSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&jogDeltaSubscriber, &node));
   if (commandSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&commandSubscriber, &node));
   if (emergencyStopSubscriberInitialized) ignoreRclRet(rcl_subscription_fini(&emergencyStopSubscriber, &node));
   if (faultPublisherInitialized) ignoreRclRet(rcl_publisher_fini(&faultPublisher, &node));
@@ -1097,6 +1106,29 @@ static void onFastMove(const void *msgIn) {
       commandId);
 }
 
+static void onJogDelta(const void *msgIn) {
+  const auto *msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msgIn);
+  if (!msg->data.data || msg->data.size < 3) return;
+
+  RobotStateSnapshot snapshot{};
+  if (!getRobotStateSnapshot(snapshot) || !snapshot.axisPositionsValid) return;
+
+  const float dxMm = msg->data.data[0];
+  const float dyMm = msg->data.data[1];
+  const float dzMm = msg->data.data[2];
+  const float speedMmS = msg->data.size > 3 ? msg->data.data[3] : 0.0f;
+  const float accelMmS2 = msg->data.size > 4 ? msg->data.data[4] : 0.0f;
+
+  uint32_t commandId = 0;
+  robotRequestMoveXYZMm(
+      snapshot.axisPositionMm[0] + dxMm,
+      snapshot.axisPositionMm[1] + dyMm,
+      snapshot.axisPositionMm[2] + dzMm,
+      speedMmS,
+      accelMmS2,
+      commandId);
+}
+
 static void finishCommandService(bool queued, uint32_t commandId, bool &success, rosidl_runtime_c__String &message, char *buffer, size_t capacity) {
   if (!queued) {
     success = false;
@@ -1390,6 +1422,14 @@ static void initMessages() {
   fastMoveMsg.data.size = 0;
   fastMoveMsg.data.capacity = 5;
 
+  jogDeltaMsg.layout.dim.size = 0;
+  jogDeltaMsg.layout.dim.capacity = 0;
+  jogDeltaMsg.layout.dim.data = nullptr;
+  jogDeltaMsg.layout.data_offset = 0;
+  jogDeltaMsg.data.data = jogDeltaData;
+  jogDeltaMsg.data.size = 0;
+  jogDeltaMsg.data.capacity = 5;
+
   setString(statusMsg.data, statusBuffer, sizeof(statusBuffer));
   setString(faultMsg.data, faultBuffer, sizeof(faultBuffer));
   setString(commandMsg.data, commandBuffer, sizeof(commandBuffer));
@@ -1551,6 +1591,16 @@ bool beginRosBridge() {
     }
     fastMoveSubscriberInitialized = true;
   }
+  if (ROS_ENABLE_JOG_DELTA_SUBSCRIBER) {
+    if (!check(rclc_subscription_init_best_effort(
+            &jogDeltaSubscriber, &node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+            "/palletizer/jog_xyz_delta"))) {
+      disconnectRosBridge();
+      return false;
+    }
+    jogDeltaSubscriberInitialized = true;
+  }
 
   if (ROS_ENABLE_GRIPPER_SERVICE) {
     if (!check(rclc_service_init_default(
@@ -1657,6 +1707,15 @@ bool beginRosBridge() {
           &emergencyStopSubscriber,
           &emergencyStopMsg,
           onEmergencyStop,
+          ON_NEW_DATA))) {
+    disconnectRosBridge();
+    return false;
+  }
+  if (ROS_ENABLE_JOG_DELTA_SUBSCRIBER && !check(rclc_executor_add_subscription(
+          &executor,
+          &jogDeltaSubscriber,
+          &jogDeltaMsg,
+          onJogDelta,
           ON_NEW_DATA))) {
     disconnectRosBridge();
     return false;

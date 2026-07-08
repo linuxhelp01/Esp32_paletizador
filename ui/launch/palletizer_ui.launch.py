@@ -22,6 +22,11 @@ def _launch_setup(context, *args, **kwargs):
     agent_verbose = LaunchConfiguration("agent_verbose").perform(context)
     backend_host = LaunchConfiguration("backend_host").perform(context)
     backend_port = LaunchConfiguration("backend_port").perform(context)
+    backend_connection_stale_ms = LaunchConfiguration("backend_connection_stale_ms").perform(context)
+    backend_availability_hold_ms = LaunchConfiguration("backend_availability_hold_ms").perform(context)
+    enable_home_origin_actions = LaunchConfiguration("enable_home_origin_actions").perform(context)
+    enable_axis_services = LaunchConfiguration("enable_axis_services").perform(context)
+    enable_extended_services = LaunchConfiguration("enable_extended_services").perform(context)
     frontend_host = LaunchConfiguration("frontend_host").perform(context)
     frontend_port = LaunchConfiguration("frontend_port").perform(context)
     microros_setup = LaunchConfiguration("microros_setup").perform(context)
@@ -43,6 +48,11 @@ def _launch_setup(context, *args, **kwargs):
         f"export ROS_DOMAIN_ID={ros_domain_id} && "
         f"export PALLETIZER_UI_HOST={backend_host} && "
         f"export PALLETIZER_UI_PORT={backend_port} && "
+        f"export PALLETIZER_CONNECTION_STALE_MS={backend_connection_stale_ms} && "
+        f"export PALLETIZER_AVAILABILITY_HOLD_MS={backend_availability_hold_ms} && "
+        f"export PALLETIZER_ENABLE_HOME_ORIGIN_ACTIONS={enable_home_origin_actions} && "
+        f"export PALLETIZER_ENABLE_AXIS_SERVICES={enable_axis_services} && "
+        f"export PALLETIZER_ENABLE_EXTENDED_SERVICES={enable_extended_services} && "
         f"cd {backend_dir} && "
         f"python3 -m palletizer_ui_backend.server"
     )
@@ -93,9 +103,14 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("ros_domain_id", default_value="10", description="ROS_DOMAIN_ID usado por el ESP32-S3 y la UI."),
         DeclareLaunchArgument("serial_dev", default_value="/dev/ttyACM0", description="Puerto serial del ESP32-S3."),
-        DeclareLaunchArgument("agent_verbose", default_value="4", description="Nivel de verbosidad del micro_ros_agent."),
+        DeclareLaunchArgument("agent_verbose", default_value="1", description="Nivel de verbosidad del micro_ros_agent."),
         DeclareLaunchArgument("backend_host", default_value="127.0.0.1", description="Host WebSocket del backend."),
         DeclareLaunchArgument("backend_port", default_value="8765", description="Puerto WebSocket del backend."),
+        DeclareLaunchArgument("backend_connection_stale_ms", default_value="1500", description="Tiempo sin telemetria para marcar ESP32/ROS como desconectado."),
+        DeclareLaunchArgument("backend_availability_hold_ms", default_value="1200", description="Retencion de disponibilidad de acciones/servicios/topicos para evitar parpadeos del grafo ROS."),
+        DeclareLaunchArgument("enable_home_origin_actions", default_value="false", description="Crear clientes UI para /palletizer/home_axis y /palletizer/go_origin solo si el firmware los expone."),
+        DeclareLaunchArgument("enable_axis_services", default_value="false", description="Crear clientes UI para /palletizer/enable_axis y /palletizer/set_axis_limits solo si el firmware los expone."),
+        DeclareLaunchArgument("enable_extended_services", default_value="false", description="Crear clientes UI para servicios extendidos de diagnostico/homing solo si el firmware los expone."),
         DeclareLaunchArgument("frontend_host", default_value="0.0.0.0", description="Host del servidor Vite."),
         DeclareLaunchArgument("frontend_port", default_value="5173", description="Puerto del servidor Vite."),
         DeclareLaunchArgument("ros_setup", default_value="/opt/ros/humble/setup.bash", description="Setup base de ROS 2 Humble."),

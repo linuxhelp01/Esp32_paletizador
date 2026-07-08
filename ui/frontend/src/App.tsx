@@ -5,6 +5,7 @@ import { JointStatePanel } from "./components/JointStatePanel";
 import { JogControl } from "./components/JogControl";
 import { MotorStateDrawer } from "./components/MotorStateDrawer";
 import { MoveControl } from "./components/MoveControl";
+import { NodeInterfacesPanel } from "./components/NodeInterfacesPanel";
 import { SafetyPanel } from "./components/SafetyPanel";
 import { ServiceControls } from "./components/ServiceControls";
 import { StatusBar } from "./components/StatusBar";
@@ -35,6 +36,7 @@ export function App() {
         </aside>
         <section className="bottom-rail">
           <EventLog events={events} />
+          <NodeInterfacesPanel state={state} lastFeedback={lastFeedback} lastResult={lastResult} send={send} />
           <JointStatePanel state={state} />
         </section>
       </div>
