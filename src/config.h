@@ -36,16 +36,22 @@ static constexpr int32_t ENCODER_COUNTS_PER_REV = 16384;
 static constexpr float LEADSCREW_MM_PER_REV = 8.0f;
 static constexpr float ENCODER_COUNTS_PER_MM = ENCODER_COUNTS_PER_REV / LEADSCREW_MM_PER_REV;
 
-// Sentido logico de cada motor respecto al eje del robot.
-// Si al ordenar un movimiento positivo el encoder corregido baja en vez de subir,
-// cambia el signo de ese motor de 1 a -1, o de -1 a 1.
-// Se invirtio el sentido positivo de los ejes fisicos X e Y: la correccion se
-// aplica tanto al comando de movimiento como a la lectura de encoder/rpm.
+// Sentido electrico usado al enviar comandos. Estos valores mantienen el
+// movimiento fisico actual de la maquina.
 static constexpr int8_t MOTOR_DIR_PHYSICAL_X = -1;
 static constexpr int8_t MOTOR_DIR_PHYSICAL_Y1 = -1;
 static constexpr int8_t MOTOR_DIR_PHYSICAL_Y2 = -1;
 static constexpr int8_t MOTOR_DIR_Z = 1;
 static constexpr int8_t MOTOR_DIR_A = 1;
+
+// Sentido usado exclusivamente para normalizar encoder y RPM al sistema de
+// coordenadas del robot. X1/X2 reportan el mismo signo de encoder cuando el
+// movimiento fisico del eje es correcto, por lo que comparten normalizacion.
+static constexpr int8_t MOTOR_FEEDBACK_DIR_PHYSICAL_X = -1;
+static constexpr int8_t MOTOR_FEEDBACK_DIR_PHYSICAL_Y1 = -1;
+static constexpr int8_t MOTOR_FEEDBACK_DIR_PHYSICAL_Y2 = -1;
+static constexpr int8_t MOTOR_FEEDBACK_DIR_Z = 1;
+static constexpr int8_t MOTOR_FEEDBACK_DIR_A = 1;
 
 // Diferencia maxima permitida entre X1 e X2, en cuentas de encoder corregidas.
 // Con 2048 cuentas/mm, 4096 cuentas equivalen a 2.0 mm.
@@ -56,6 +62,10 @@ static constexpr uint32_t X_PAIR_ALIGNMENT_SAMPLE_SKEW_MS = 20;
 // sentidos opuestos, o avanzan contra el sentido esperado, se detiene todo y
 // queda enclavado un estado de falla hasta ejecutar FAULT RESET.
 static constexpr int32_t X_PAIR_DIRECTION_MIN_DELTA_COUNTS = 256;
+static constexpr int16_t X_PAIR_SPEED_CHECK_MIN_RPM = 20;
+static constexpr float X_PAIR_SPEED_MAX_RELATIVE_ERROR = 0.25f;
+static constexpr uint8_t X_PAIR_SPEED_FAULT_CONFIRMATIONS = 2;
+static constexpr uint32_t X_PAIR_SPEED_SAMPLE_SKEW_MS = 20;
 
 static constexpr int32_t MIN_INT24 = -8388607;
 static constexpr int32_t MAX_INT24 = 8388607;

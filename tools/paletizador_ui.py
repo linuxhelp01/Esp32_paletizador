@@ -1,3 +1,4 @@
+import os
 import queue
 import re
 import threading
@@ -25,6 +26,9 @@ STATUS_RE = re.compile(
     r"rpm=(?P<rpm>-?\d+|\?)\s+"
     r"acc=(?P<acc>\d+)\s+moveStatus=(?P<move>\d+)\s+"
     r"homeStatus=(?P<home>\d+)\s+last=(?P<last>\d+)"
+)
+STATUS_HEADER_RE = re.compile(
+    r"^\s*safetyFault=(?P<fault>[01])\s+xSafety=(?P<x_safety>[01])\s+reason=(?P<reason>.*)$"
 )
 
 
@@ -99,13 +103,22 @@ class App(tk.Tk):
         self.axis_a_velocity_var = tk.StringVar(value="90.0")
         self.axis_a_accel_var = tk.StringVar(value="180.0")
         self.axis_a_jog_velocity_var = tk.StringVar(value="30.0")
+        self.jog_linear_speed_var = tk.StringVar(value="25.0")
+        self.jog_linear_accel_var = tk.StringVar(value="200.0")
+        self.jog_angular_speed_var = tk.StringVar(value="30.0")
+        self.jog_angular_accel_var = tk.StringVar(value="180.0")
         self.auto_status_var = tk.BooleanVar(value=True)
+        self.x_safety_enabled_var = tk.BooleanVar(value=True)
+        self.x_safety_reported = True
         self.link_status_var = tk.StringVar(value="No conexion")
         self.link_ok = False
         self.link_deadline = 0.0
+        self.active_jog_axes = set()
 
         self._build()
         self.refresh_ports()
+        if os.environ.get("PALLETIZER_AUTOCONNECT") == "1" and self.port_var.get():
+            self.after(100, self.connect)
         self.after(50, self.process_inbox)
         self.after(500, self.poll_status)
 
@@ -135,10 +148,12 @@ class App(tk.Tk):
         axis_tab = ttk.Frame(motion_tabs, padding=10)
         xyz_tab = ttk.Frame(motion_tabs, padding=10)
         axis_a_tab = ttk.Frame(motion_tabs, padding=10)
+        jog_tab = ttk.Frame(motion_tabs, padding=10)
         motion_tabs.add(motor_tab, text="Prueba 1: angular motor")
         motion_tabs.add(axis_tab, text="Prueba 2: lineal eje")
         motion_tabs.add(xyz_tab, text="Prueba 3: lineal XYZ")
         motion_tabs.add(axis_a_tab, text="Eje A rotatorio")
+        motion_tabs.add(jog_tab, text="Jog digital XYZ+A")
 
         for col in range(10):
             motor_tab.columnconfigure(col, weight=1)
@@ -201,6 +216,39 @@ class App(tk.Tk):
         ttk.Button(axis_a_tab, text="HOME A", command=lambda: self.send("HOME A")).grid(row=1, column=6, sticky="ew", padx=(0, 8))
         ttk.Button(axis_a_tab, text="ZERO A", command=lambda: self.send("ZERO A")).grid(row=1, column=7, sticky="ew")
 
+        controls = ttk.Frame(jog_tab)
+        controls.grid(row=0, column=0, sticky="nsew", padx=(0, 20))
+        settings = ttk.Frame(jog_tab)
+        settings.grid(row=0, column=1, sticky="nsew")
+        jog_tab.columnconfigure(0, weight=3)
+        jog_tab.columnconfigure(1, weight=2)
+
+        ttk.Label(controls, text="Plano XY").grid(row=0, column=0, columnspan=3)
+        self._add_jog_button(controls, "Y+", "Y", 1, row=1, column=1)
+        self._add_jog_button(controls, "X-", "X", -1, row=2, column=0)
+        ttk.Button(controls, text="STOP", command=self.stop_all_jogs).grid(row=2, column=1, sticky="nsew", padx=3, pady=3)
+        self._add_jog_button(controls, "X+", "X", 1, row=2, column=2)
+        self._add_jog_button(controls, "Y-", "Y", -1, row=3, column=1)
+
+        ttk.Label(controls, text="Eje Z").grid(row=0, column=3, padx=(18, 0))
+        self._add_jog_button(controls, "Z+", "Z", 1, row=1, column=3, padx=(18, 3))
+        self._add_jog_button(controls, "Z-", "Z", -1, row=2, column=3, padx=(18, 3))
+
+        ttk.Label(controls, text="Eje A").grid(row=0, column=4, columnspan=2, padx=(18, 0))
+        self._add_jog_button(controls, "A-", "A", -1, row=1, column=4, padx=(18, 3))
+        self._add_jog_button(controls, "A+", "A", 1, row=1, column=5)
+
+        ttk.Label(settings, text="Velocidad XYZ (mm/s)").grid(row=0, column=0, sticky="w")
+        ttk.Entry(settings, textvariable=self.jog_linear_speed_var, width=12).grid(row=1, column=0, sticky="ew", padx=(0, 8))
+        ttk.Label(settings, text="Aceleracion XYZ (mm/s2)").grid(row=0, column=1, sticky="w")
+        ttk.Entry(settings, textvariable=self.jog_linear_accel_var, width=12).grid(row=1, column=1, sticky="ew")
+        ttk.Label(settings, text="Velocidad A (deg/s)").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(settings, textvariable=self.jog_angular_speed_var, width=12).grid(row=3, column=0, sticky="ew", padx=(0, 8))
+        ttk.Label(settings, text="Aceleracion A (deg/s2)").grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Entry(settings, textvariable=self.jog_angular_accel_var, width=12).grid(row=3, column=1, sticky="ew")
+
+        self.bind_all("<ButtonRelease-1>", self._on_global_button_release, add="+")
+
         quick = ttk.Frame(root)
         quick.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         ttk.Button(quick, text="STATUS", command=lambda: self.send("STATUS")).pack(side="left")
@@ -210,6 +258,12 @@ class App(tk.Tk):
         ttk.Button(quick, text="FAULT STATUS", command=lambda: self.send("FAULT STATUS")).pack(side="left", padx=(8, 0))
         ttk.Button(quick, text="FAULT RESET", command=lambda: self.send("FAULT RESET")).pack(side="left", padx=(8, 0))
         ttk.Button(quick, text="FAULT TEST", command=lambda: self.send("FAULT TEST")).pack(side="left", padx=(8, 0))
+        ttk.Checkbutton(
+            quick,
+            text="Seguridad eje X",
+            variable=self.x_safety_enabled_var,
+            command=self.toggle_x_safety,
+        ).pack(side="left", padx=(16, 0))
         ttk.Checkbutton(quick, text="Actualizar estado", variable=self.auto_status_var).pack(side="left", padx=(16, 0))
 
         columns = ("axis", "id", "online", "enc", "deg", "mm", "rpm", "acc", "move", "home", "last")
@@ -259,7 +313,10 @@ class App(tk.Tk):
             return
         ports = [port.device for port in list_ports.comports()]
         self.port_combo["values"] = ports
-        if ports and not self.port_var.get():
+        preferred_port = os.environ.get("PALLETIZER_PORT", "")
+        if preferred_port in ports:
+            self.port_var.set(preferred_port)
+        elif ports and not self.port_var.get():
             self.port_var.set(ports[0])
 
     def connect(self):
@@ -276,6 +333,8 @@ class App(tk.Tk):
             messagebox.showerror("Conexion serial", str(exc))
 
     def disconnect(self):
+        if self.serial_worker.port and self.serial_worker.port.is_open:
+            self.stop_all_jogs(log=False)
         self.serial_worker.disconnect()
         self.link_ok = False
         self.link_status_var.set("No conexion")
@@ -317,6 +376,49 @@ class App(tk.Tk):
             f"{self.axis_a_accel_var.get()}"
         )
 
+    def _add_jog_button(self, parent, text, axis, direction, row, column, padx=3):
+        button = ttk.Button(parent, text=text, takefocus=False)
+        button.grid(row=row, column=column, sticky="nsew", padx=padx, pady=3, ipadx=12, ipady=5)
+        button.bind("<ButtonPress-1>", lambda event: self.start_jog(axis, direction))
+        return button
+
+    def start_jog(self, axis, direction):
+        try:
+            if axis == "A":
+                speed = abs(float(self.jog_angular_speed_var.get())) * direction
+                accel = abs(float(self.jog_angular_accel_var.get()))
+                command = f"VELA {speed:g} {accel:g}"
+            else:
+                speed = abs(float(self.jog_linear_speed_var.get())) * direction
+                accel = abs(float(self.jog_linear_accel_var.get()))
+                command = f"VELLINE {axis} {speed:g} {accel:g}"
+        except ValueError:
+            messagebox.showwarning("Jog digital", "Velocidad o aceleracion no valida")
+            return
+
+        self.active_jog_axes.add(axis)
+        self.send(command)
+
+    def stop_jog(self, axis, log=False):
+        if axis not in self.active_jog_axes:
+            return
+        self.active_jog_axes.discard(axis)
+        if axis == "A":
+            self.send(f"VELA 0 {self.jog_angular_accel_var.get()}", log=log)
+        else:
+            self.send(f"VELLINE {axis} 0 {self.jog_linear_accel_var.get()}", log=log)
+
+    def stop_all_jogs(self, log=True):
+        active_axes = tuple(self.active_jog_axes)
+        for axis in active_axes:
+            self.stop_jog(axis, log=False)
+        if self.serial_worker.port and self.serial_worker.port.is_open:
+            self.send("STOP", log=log)
+
+    def _on_global_button_release(self, event):
+        for axis in tuple(self.active_jog_axes):
+            self.stop_jog(axis)
+
     def send_robot_home(self):
         self.send(f"HOME {self.robot_axis_var.get()}")
 
@@ -334,9 +436,29 @@ class App(tk.Tk):
             self.serial_worker.send(line)
             if log:
                 self.append_log(f"> {line}")
+            return True
         except Exception as exc:
             if log:
                 messagebox.showwarning("Envio serial", str(exc))
+            return False
+
+    def toggle_x_safety(self):
+        enabled = self.x_safety_enabled_var.get()
+        if not enabled:
+            confirmed = messagebox.askyesno(
+                "Desactivar seguridad eje X",
+                "Se omitiran las paradas por desalineacion, sentido y diferencia de velocidad X1/X2. "
+                "La parada global seguira disponible. Deseas continuar?",
+                icon="warning",
+            )
+            if not confirmed:
+                self.x_safety_enabled_var.set(self.x_safety_reported)
+                return
+
+        if not self.send(f"XSAFETY {1 if enabled else 0}"):
+            self.x_safety_enabled_var.set(self.x_safety_reported)
+            return
+        self.after(200, lambda: self.send("STATUS", log=False))
 
     def process_inbox(self):
         while True:
@@ -369,6 +491,12 @@ class App(tk.Tk):
         self.after(500, self.poll_status)
 
     def update_status_table(self, line):
+        header_match = STATUS_HEADER_RE.match(line)
+        if header_match:
+            self.x_safety_reported = header_match.group("x_safety") == "1"
+            self.x_safety_enabled_var.set(self.x_safety_reported)
+            return True
+
         match = STATUS_RE.match(line)
         if not match:
             return False
@@ -397,6 +525,8 @@ class App(tk.Tk):
         self.log.configure(state="disabled")
 
     def destroy(self):
+        if self.serial_worker.port and self.serial_worker.port.is_open:
+            self.stop_all_jogs(log=False)
         self.serial_worker.disconnect()
         super().destroy()
 

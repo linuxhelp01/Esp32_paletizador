@@ -15,13 +15,15 @@ enum class Axis : uint8_t {
 struct MotorNode {
   const char *name;
   uint16_t canId;
-  int8_t direction;
+  int8_t commandDirection;
+  int8_t feedbackDirection;
   bool rotaryAxis;
   int64_t rawEncoder = 0;
   int64_t encoder = 0;
   int64_t previousEncoder = 0;
   uint32_t lastEncoderUpdateMs = 0;
   int16_t rpm = 0;
+  uint32_t lastRpmUpdateMs = 0;
   uint8_t lastAcc = 0;
   uint8_t moveStatus = 0;
   uint8_t homeStatus = 0;
@@ -29,8 +31,17 @@ struct MotorNode {
   bool rpmOk = false;
   uint32_t lastSeenMs = 0;
 
-  MotorNode(const char *nodeName, uint16_t nodeCanId, int8_t nodeDirection, bool nodeRotaryAxis = false)
-      : name(nodeName), canId(nodeCanId), direction(nodeDirection), rotaryAxis(nodeRotaryAxis) {}
+  MotorNode(
+      const char *nodeName,
+      uint16_t nodeCanId,
+      int8_t nodeCommandDirection,
+      int8_t nodeFeedbackDirection,
+      bool nodeRotaryAxis = false)
+      : name(nodeName),
+        canId(nodeCanId),
+        commandDirection(nodeCommandDirection),
+        feedbackDirection(nodeFeedbackDirection),
+        rotaryAxis(nodeRotaryAxis) {}
 };
 
 extern MotorNode motors[5];
